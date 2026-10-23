@@ -11,11 +11,6 @@ data/
 /bin/
 *.exe
 
-# python
-__pycache__/
-.venv/
-*.pyc
-
 # editors / os
 .vscode/
 .idea/
