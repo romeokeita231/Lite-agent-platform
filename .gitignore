@@ -1,0 +1,22 @@
+# secrets
+.env
+.env.*
+
+# data
+data/
+*.db
+*.sqlite3
+
+# go
+/bin/
+*.exe
+
+# python
+__pycache__/
+.venv/
+*.pyc
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
