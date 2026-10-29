@@ -38,5 +38,9 @@ identifiers, test names and commit messages are English.
 - `origin` is `github.com/romeokeita231/Lite-agent-platform`. A global
   `url.https://gh-proxy.com/…insteadOf` rewrite routes HTTPS git traffic through the proxy;
   `gh` talks to `api.github.com` directly.
+- Because the remote host is the proxy, `gh` cannot infer the repo inside this clone and
+  fails with *none of the git remotes … point to a known GitHub host*. Set
+  `GH_REPO=romeokeita231/Lite-agent-platform` or pass `-R romeokeita231/Lite-agent-platform`
+  to every `gh` command.
 - Secrets live in environment variables only. Nothing credential-shaped gets committed;
   `.env*` is ignored.
