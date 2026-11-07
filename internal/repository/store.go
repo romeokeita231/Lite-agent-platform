@@ -138,10 +138,10 @@ func (s *Store) CreateRun(ctx context.Context, run domain.Run) (domain.Run, erro
 	}
 	var statusOut string
 	err = s.pool.QueryRow(ctx,
-		`insert into runs (id, tenant_id, agent_id, status, input)
-		 values ($1::uuid, $2, $3, $4, $5)
+		`insert into runs (id, tenant_id, agent_id, status, input, eval_id)
+		 values ($1::uuid, $2, $3, $4, $5, $6)
 		 returning status, input, created_at, updated_at`,
-		run.ID, run.TenantID, run.AgentID, string(status), input,
+		run.ID, run.TenantID, run.AgentID, string(status), input, run.EvalID,
 	).Scan(&statusOut, &run.Input, &run.CreatedAt, &run.UpdatedAt)
 	if err != nil {
 		return domain.Run{}, err
@@ -996,6 +996,102 @@ func (s *Store) CompleteToolCallStep(ctx context.Context, checkpoint domain.Chec
 		return domain.ErrNotFound
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) ListToolInvocations(ctx context.Context, runID string) ([]domain.ToolInvocation, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`select id::text, tenant_id, run_id::text, tool_name, version, args, result, status, created_at
+		 from tool_invocations
+		 where tenant_id = $1 and run_id::text = $2
+		 order by created_at asc, id asc`,
+		tenantID, runID)
+	if err != nil {
+		return nil, err
+	}
+	invocations, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.ToolInvocation, error) {
+		var invocation domain.ToolInvocation
+		err := row.Scan(&invocation.ID, &invocation.TenantID, &invocation.RunID, &invocation.ToolName,
+			&invocation.Version, &invocation.Args, &invocation.Result, &invocation.Status, &invocation.CreatedAt)
+		return invocation, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if invocations == nil {
+		invocations = []domain.ToolInvocation{}
+	}
+	return invocations, nil
+}
+
+func (s *Store) CreateEvalReport(ctx context.Context, report domain.EvalReport) (domain.EvalReport, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.EvalReport{}, err
+	}
+	if report.TenantID != tenantID {
+		return domain.EvalReport{}, domain.ErrNotFound
+	}
+	results := report.Results
+	if len(results) == 0 {
+		results = json.RawMessage("[]")
+	}
+	err = s.pool.QueryRow(ctx,
+		`insert into eval_reports (id, tenant_id, status, cases_snapshot, results)
+		 values ($1, $2, $3, $4, $5)
+		 returning created_at`,
+		report.ID, report.TenantID, report.Status, report.CasesSnapshot, results,
+	).Scan(&report.CreatedAt)
+	if err != nil {
+		return domain.EvalReport{}, err
+	}
+	report.Results = results
+	return report, nil
+}
+
+func (s *Store) GetEvalReport(ctx context.Context, id string) (domain.EvalReport, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.EvalReport{}, err
+	}
+	var report domain.EvalReport
+	err = s.pool.QueryRow(ctx,
+		`select id, tenant_id, status, cases_snapshot, coalesce(results, '[]'::jsonb), created_at, ended_at
+		 from eval_reports where id = $1 and tenant_id = $2`,
+		id, tenantID,
+	).Scan(&report.ID, &report.TenantID, &report.Status, &report.CasesSnapshot, &report.Results,
+		&report.CreatedAt, &report.EndedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.EvalReport{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.EvalReport{}, err
+	}
+	return report, nil
+}
+
+func (s *Store) FinishEvalReport(ctx context.Context, id, status string, results json.RawMessage, endedAt time.Time) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		results = json.RawMessage("[]")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`update eval_reports set status = $3, results = $4, ended_at = $5
+		 where id = $1 and tenant_id = $2`,
+		id, tenantID, status, results, endedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 const runColumns = `select id::text, tenant_id, agent_id, status, input, output, attempt, next_attempt_at,
