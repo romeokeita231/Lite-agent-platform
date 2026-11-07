@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +21,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
 	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
+	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 const (
@@ -24,9 +30,34 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "keygen" {
+		if err := keygen(os.Stdout); err != nil {
+			log.Fatalf("platform keygen: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("platform: %v", err)
 	}
+}
+
+func keygen(w io.Writer) error {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return err
+	}
+	apiKey := hex.EncodeToString(raw[:])
+	sum := sha256.Sum256([]byte(apiKey))
+	payload := struct {
+		APIKey       string `json:"api_key"`
+		APIKeyHash   string `json:"api_key_hash"`
+		APIKeyPrefix string `json:"api_key_prefix"`
+	}{
+		APIKey:       apiKey,
+		APIKeyHash:   hex.EncodeToString(sum[:]),
+		APIKeyPrefix: apiKey[:8],
+	}
+	return json.NewEncoder(w).Encode(payload)
 }
 
 func run() error {
@@ -49,7 +80,7 @@ func run() error {
 	maint.check(ctx)
 	go maint.loop(ctx, maintenanceInterval)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, repository.New(pool))}
 
 	go func() {
 		<-ctx.Done()
