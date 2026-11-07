@@ -22,6 +22,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
+	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
 )
 
 const (
@@ -80,7 +81,15 @@ func run() error {
 	maint.check(ctx)
 	go maint.loop(ctx, maintenanceInterval)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, repository.New(pool))}
+	store := repository.New(pool)
+	dispatcher := agentruntime.New(store, agentruntime.Options{
+		StepTimeout:     cfg.StepTimeout,
+		MaxStepAttempts: cfg.MaxStepAttempts,
+		PollInterval:    cfg.PollInterval,
+	})
+	go dispatcher.Run(ctx)
+
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store)}
 
 	go func() {
 		<-ctx.Done()

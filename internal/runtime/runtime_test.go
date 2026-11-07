@@ -1,0 +1,338 @@
+package runtime_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
+	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
+	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
+	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
+	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
+)
+
+type alwaysReady struct{}
+
+func (alwaysReady) Ready() bool { return true }
+
+type ledgerStepPayload struct {
+	StepIndex int             `json:"step_index"`
+	StepType  string          `json:"step_type"`
+	Result    json.RawMessage `json:"result"`
+}
+
+type policyRequest struct {
+	RunID     string          `json:"run_id"`
+	Agent     string          `json:"agent"`
+	StepIndex int             `json:"step_index"`
+	Attempt   int             `json:"attempt"`
+	Input     json.RawMessage `json:"input"`
+	Ledger    struct {
+		Recent  []ledgerStepPayload `json:"recent"`
+		Summary string              `json:"summary"`
+		Dropped []int               `json:"dropped"`
+	} `json:"ledger"`
+}
+
+type policyServer struct {
+	srv      *httptest.Server
+	mu       sync.Mutex
+	requests []policyRequest
+}
+
+func newPolicyServer(t *testing.T, secret, response string) *policyServer {
+	t.Helper()
+	p := &policyServer{}
+	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "unreadable body", http.StatusUnauthorized)
+			return
+		}
+		timestamp := r.Header.Get("X-Timestamp")
+		expected := sign(secret, r.Method, r.URL.Path, body, timestamp)
+		if !hmac.Equal([]byte(expected), []byte(r.Header.Get("X-Signature"))) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		var request policyRequest
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		p.mu.Lock()
+		p.requests = append(p.requests, request)
+		p.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(response))
+	}))
+	t.Cleanup(p.srv.Close)
+	return p
+}
+
+func (p *policyServer) last(t *testing.T) policyRequest {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.requests) == 0 {
+		t.Fatalf("policy received no requests")
+	}
+	return p.requests[len(p.requests)-1]
+}
+
+type env struct {
+	env  *testutil.Env
+	srv  *httptest.Server
+	keys map[string]string
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	base := testutil.New(t)
+	store := repository.New(base.Pool)
+	e := &env{
+		env: base,
+		keys: map[string]string{
+			"tenant-a": "key-tenant-a-0123456789",
+			"tenant-b": "key-tenant-b-0123456789",
+		},
+	}
+	for tenantID, key := range e.keys {
+		ctx := repository.WithTenant(context.Background(), tenantID)
+		if err := store.CreateTenant(ctx, domain.Tenant{
+			ID:           tenantID,
+			Name:         tenantID,
+			APIKeyHash:   hashHex(key),
+			APIKeyPrefix: key[:8],
+		}); err != nil {
+			t.Fatalf("create tenant %s: %v", tenantID, err)
+		}
+	}
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store))
+	t.Cleanup(e.srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatcher := agentruntime.New(store, agentruntime.Options{
+		StepTimeout:     2 * time.Second,
+		MaxStepAttempts: 3,
+		PollInterval:    10 * time.Millisecond,
+	})
+	done := make(chan struct{})
+	go func() {
+		dispatcher.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return e
+}
+
+func (e *env) do(t *testing.T, method, path, tenant string, body any) (int, []byte) {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request: %v", err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, e.srv.URL+path, reader)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+e.keys[tenant])
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("%s %s content-type = %q", method, path, got)
+	}
+	return resp.StatusCode, raw
+}
+
+func (e *env) createAgent(t *testing.T, tenant, name, policyURL, secretEnv string) domain.Agent {
+	t.Helper()
+	status, raw := e.do(t, http.MethodPost, "/v1/agents", tenant, map[string]string{
+		"name":       name,
+		"policy_url": policyURL,
+		"secret_env": secretEnv,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create agent status = %d body=%s", status, raw)
+	}
+	var agent domain.Agent
+	if err := json.Unmarshal(raw, &agent); err != nil {
+		t.Fatalf("decode agent: %v", err)
+	}
+	return agent
+}
+
+func (e *env) submitRun(t *testing.T, tenant, agentID string) domain.Run {
+	t.Helper()
+	status, raw := e.do(t, http.MethodPost, "/v1/runs", tenant, map[string]any{
+		"agent_id": agentID,
+		"input":    map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create run status = %d body=%s", status, raw)
+	}
+	var run domain.Run
+	if err := json.Unmarshal(raw, &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	return run
+}
+
+func (e *env) waitRun(t *testing.T, tenant, id string, want domain.RunStatus, timeout time.Duration) domain.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last domain.Run
+	for time.Now().Before(deadline) {
+		status, raw := e.do(t, http.MethodGet, "/v1/runs/"+id, tenant, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get run %s status = %d body=%s", id, status, raw)
+		}
+		if err := json.Unmarshal(raw, &last); err != nil {
+			t.Fatalf("decode run: %v", err)
+		}
+		if last.Status == want {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("run %s status = %s, want %s", id, last.Status, want)
+	return last
+}
+
+type stepPayload struct {
+	StepIndex int             `json:"step_index"`
+	StepType  string          `json:"step_type"`
+	Result    json.RawMessage `json:"result"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+func TestRunReachesDoneThroughSignedPolicy(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	policy := newPolicyServer(t, secret, `{"action":"done","output":{"answer":"done"}}`)
+	e := newEnv(t)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+
+	completed := e.waitRun(t, "tenant-a", run.ID, domain.RunCompleted, 5*time.Second)
+	if completed.EndedAt == nil {
+		t.Fatalf("completed run has no ended_at: %+v", completed)
+	}
+	if string(completed.Output) != `{"answer":"done"}` {
+		t.Fatalf("completed run output = %s", completed.Output)
+	}
+
+	status, raw := e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("get steps status = %d body=%s", status, raw)
+	}
+	var steps []stepPayload
+	if err := json.Unmarshal(raw, &steps); err != nil {
+		t.Fatalf("decode steps %s: %v", raw, err)
+	}
+	if len(steps) != 1 || steps[0].StepIndex != 0 || steps[0].StepType != "done" {
+		t.Fatalf("steps = %+v", steps)
+	}
+	if string(steps[0].Result) != `{"output":{"answer":"done"}}` {
+		t.Fatalf("step result = %s", steps[0].Result)
+	}
+	if steps[0].CreatedAt.IsZero() {
+		t.Fatalf("step created_at is zero")
+	}
+
+	status, raw = e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-b", nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("cross-tenant steps status = %d body=%s", status, raw)
+	}
+
+	request := policy.last(t)
+	if request.RunID != run.ID || request.Agent != "alpha" || request.StepIndex != 0 || request.Attempt != 0 {
+		t.Fatalf("policy request = %+v", request)
+	}
+	var input struct {
+		OrderID string `json:"order_id"`
+	}
+	if err := json.Unmarshal(request.Input, &input); err != nil || input.OrderID != "A1" {
+		t.Fatalf("policy request input = %s (%v)", request.Input, err)
+	}
+	if len(request.Ledger.Recent) != 0 || request.Ledger.Summary != "" || len(request.Ledger.Dropped) != 0 {
+		t.Fatalf("policy ledger = %+v", request.Ledger)
+	}
+}
+
+func TestRunFailsOnInvalidPolicyAction(t *testing.T) {
+	cases := []struct {
+		name     string
+		response string
+	}{
+		{"unknown_action", `{"action":"bogus"}`},
+		{"missing_action", `{}`},
+		{"wrong_output_type", `{"action":"done","output":"nope"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const secret = "runtime-secret"
+			t.Setenv("POLICY_SECRET_ALPHA", secret)
+			policy := newPolicyServer(t, secret, tc.response)
+			e := newEnv(t)
+
+			agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+			run := e.submitRun(t, "tenant-a", agent.ID)
+
+			failed := e.waitRun(t, "tenant-a", run.ID, domain.RunFailed, 5*time.Second)
+			if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonPolicyInvalidAction {
+				t.Fatalf("terminal reason = %v, want policy_invalid_action", failed.TerminalReason)
+			}
+
+			status, raw := e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-a", nil)
+			if status != http.StatusOK {
+				t.Fatalf("get steps status = %d body=%s", status, raw)
+			}
+			var steps []stepPayload
+			if err := json.Unmarshal(raw, &steps); err != nil {
+				t.Fatalf("decode steps %s: %v", raw, err)
+			}
+			if len(steps) != 0 {
+				t.Fatalf("failed run steps = %+v", steps)
+			}
+		})
+	}
+}
+
+func hashHex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func sign(secret, method, path string, body []byte, timestamp string) string {
+	sum := sha256.Sum256(body)
+	payload := method + "\n" + path + "\n" + hex.EncodeToString(sum[:]) + "\n" + timestamp
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	return hex.EncodeToString(mac.Sum(nil))
+}

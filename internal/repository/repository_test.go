@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
@@ -254,6 +255,228 @@ func TestRunsAreTenantScoped(t *testing.T) {
 	if _, err := store.GetRun(context.Background(), runID); !errors.Is(err, domain.ErrNoTenant) {
 		t.Fatalf("get run without tenant error = %v, want ErrNoTenant", err)
 	}
+}
+
+func TestDispatcherRunAccessIgnoresTenantFilter(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+
+	runA := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	runB := createTestRun(t, store, ctxB, "tenant-b", "agent-b")
+	future := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	if _, err := env.Pool.Exec(context.Background(),
+		`update runs set next_attempt_at = now() + interval '1 hour' where id::text = $1`, future.ID); err != nil {
+		t.Fatalf("delay run: %v", err)
+	}
+
+	runs, err := store.ListRunnableRuns(context.Background())
+	if err != nil {
+		t.Fatalf("list runnable runs: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runnable runs = %d, want 2", len(runs))
+	}
+	seen := map[string]bool{}
+	for _, run := range runs {
+		seen[run.ID] = true
+	}
+	if !seen[runA.ID] || !seen[runB.ID] || seen[future.ID] {
+		t.Fatalf("runnable runs = %+v", runs)
+	}
+
+	claimed, err := store.ClaimRun(context.Background(), runA.ID)
+	if err != nil {
+		t.Fatalf("claim run a: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("first claim of run a failed")
+	}
+	claimed, err = store.ClaimRun(context.Background(), runA.ID)
+	if err != nil {
+		t.Fatalf("second claim run a: %v", err)
+	}
+	if claimed {
+		t.Fatalf("second claim of run a succeeded")
+	}
+
+	runs, err = store.ListRunnableRuns(context.Background())
+	if err != nil {
+		t.Fatalf("list runnable runs after claim: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != runB.ID {
+		t.Fatalf("runnable runs after claim = %+v", runs)
+	}
+}
+
+func TestCompleteRunStepWritesCheckpointSpanAndCompletion(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+
+	output := json.RawMessage(`{"answer":"done"}`)
+	checkpoint := domain.Checkpoint{
+		RunID:     run.ID,
+		TenantID:  "tenant-a",
+		StepIndex: 0,
+		StepType:  domain.StepDone,
+		Result:    json.RawMessage(`{"output":{"answer":"done"}}`),
+		CreatedAt: time.Now(),
+	}
+	runID := run.ID
+	span := domain.Span{
+		ID:         ids.New(),
+		TenantID:   "tenant-a",
+		RunID:      &runID,
+		StepIndex:  0,
+		Attempt:    0,
+		Name:       "step.done",
+		StartedAt:  time.Now(),
+		EndedAt:    time.Now(),
+		Attributes: json.RawMessage(`{}`),
+	}
+	if err := store.CompleteRunStep(ctxA, checkpoint, span, output); err != nil {
+		t.Fatalf("complete run step: %v", err)
+	}
+
+	fetched, err := store.GetRun(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get completed run: %v", err)
+	}
+	if fetched.Status != domain.RunCompleted || fetched.EndedAt == nil || fetched.Attempt != 0 {
+		t.Fatalf("completed run = %+v", fetched)
+	}
+	var gotOutput struct {
+		Answer string `json:"answer"`
+	}
+	if err := json.Unmarshal(fetched.Output, &gotOutput); err != nil || gotOutput.Answer != "done" {
+		t.Fatalf("completed run output = %s (%v)", fetched.Output, err)
+	}
+
+	steps, err := store.GetSteps(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if len(steps) != 1 || steps[0].StepIndex != 0 || steps[0].StepType != domain.StepDone {
+		t.Fatalf("steps = %+v", steps)
+	}
+
+	var spanCount int
+	if err := env.Pool.QueryRow(context.Background(), `select count(*) from spans where run_id::text = $1`, run.ID).Scan(&spanCount); err != nil {
+		t.Fatalf("count spans: %v", err)
+	}
+	if spanCount != 1 {
+		t.Fatalf("span count = %d, want 1", spanCount)
+	}
+}
+
+func TestCompleteRunStepRollsBackWhenSpanCannotBeWritten(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+
+	spanID := ids.New()
+	if _, err := env.Pool.Exec(context.Background(),
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at)
+		 values ($1::uuid, 'tenant-a', $2::uuid, 0, 0, 'existing', now(), now())`,
+		spanID, run.ID); err != nil {
+		t.Fatalf("seed span: %v", err)
+	}
+
+	runID := run.ID
+	err := store.CompleteRunStep(ctxA, domain.Checkpoint{
+		RunID:     run.ID,
+		TenantID:  "tenant-a",
+		StepIndex: 0,
+		StepType:  domain.StepDone,
+		Result:    json.RawMessage(`{"output":{}}`),
+		CreatedAt: time.Now(),
+	}, domain.Span{
+		ID:        spanID,
+		TenantID:  "tenant-a",
+		RunID:     &runID,
+		StepIndex: 0,
+		Name:      "step.done",
+		StartedAt: time.Now(),
+		EndedAt:   time.Now(),
+	}, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatalf("complete run step with duplicate span id succeeded")
+	}
+
+	var checkpointCount int
+	if err := env.Pool.QueryRow(context.Background(), `select count(*) from checkpoints where run_id::text = $1`, run.ID).Scan(&checkpointCount); err != nil {
+		t.Fatalf("count checkpoints: %v", err)
+	}
+	if checkpointCount != 0 {
+		t.Fatalf("checkpoint count = %d after rollback, want 0", checkpointCount)
+	}
+	fetched, err := store.GetRun(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if fetched.Status != domain.RunRunning || fetched.EndedAt != nil {
+		t.Fatalf("run after rollback = %+v", fetched)
+	}
+}
+
+func TestGetStepsOrderingAndTenantScope(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+
+	for _, index := range []int{1, 0} {
+		if _, err := env.Pool.Exec(context.Background(),
+			`insert into checkpoints (run_id, tenant_id, step_index, step_type, result)
+			 values ($1::uuid, 'tenant-a', $2, 'done', $3)`,
+			run.ID, index, json.RawMessage(`{"output":{}}`)); err != nil {
+			t.Fatalf("seed checkpoint %d: %v", index, err)
+		}
+	}
+
+	steps, err := store.GetSteps(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if len(steps) != 2 || steps[0].StepIndex != 0 || steps[1].StepIndex != 1 {
+		t.Fatalf("steps order = %+v", steps)
+	}
+
+	if _, err := store.GetSteps(ctxB, run.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant get steps error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetSteps(ctxA, ids.New()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing get steps error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetSteps(context.Background(), run.ID); !errors.Is(err, domain.ErrNoTenant) {
+		t.Fatalf("get steps without tenant error = %v, want ErrNoTenant", err)
+	}
+}
+
+func createTestRun(t *testing.T, store *repository.Store, ctx context.Context, tenantID, agentID string) domain.Run {
+	t.Helper()
+	run, err := store.CreateRun(ctx, domain.Run{
+		ID:       ids.New(),
+		TenantID: tenantID,
+		AgentID:  agentID,
+		Status:   domain.RunQueued,
+		Input:    json.RawMessage(`{"order_id":"A1"}`),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	return run
 }
 
 func hashHex(value string) string {
