@@ -45,6 +45,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if tenantConcurrency <= 0 {
+		return Config{}, fmt.Errorf("TENANT_CONCURRENCY must be a positive integer")
+	}
+	if tenantRate < 0 {
+		return Config{}, fmt.Errorf("TENANT_RATE must not be negative")
+	}
 	modelChainBudget, err := durationEnv("MODEL_CHAIN_BUDGET", stepTimeout)
 	if err != nil {
 		return Config{}, err

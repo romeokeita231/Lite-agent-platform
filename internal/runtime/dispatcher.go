@@ -16,9 +16,17 @@ import (
 )
 
 type Options struct {
-	StepTimeout     time.Duration
-	MaxStepAttempts int
-	PollInterval    time.Duration
+	StepTimeout       time.Duration
+	MaxStepAttempts   int
+	PollInterval      time.Duration
+	TenantConcurrency int
+	TenantRate        float64
+}
+
+type tenantLimit struct {
+	inflight int
+	tokens   float64
+	last     time.Time
 }
 
 type Dispatcher struct {
@@ -32,9 +40,17 @@ type Dispatcher struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
+	limitMu  sync.Mutex
+	limits   map[string]*tenantLimit
 }
 
 func New(store domain.Store, gateway domain.ModelGateway, tools domain.ToolGateway, opts Options) *Dispatcher {
+	if opts.TenantConcurrency <= 0 {
+		opts.TenantConcurrency = 4
+	}
+	if opts.TenantRate < 0 {
+		opts.TenantRate = 0
+	}
 	return &Dispatcher{
 		store:   store,
 		gateway: gateway,
@@ -43,6 +59,7 @@ func New(store domain.Store, gateway domain.ModelGateway, tools domain.ToolGatew
 		client:  newPolicyClient(opts.StepTimeout),
 		stopCh:  make(chan struct{}),
 		done:    make(chan struct{}),
+		limits:  make(map[string]*tenantLimit),
 	}
 }
 
@@ -93,19 +110,60 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		if ctx.Err() != nil || d.stopped.Load() {
 			return
 		}
+		if !d.acquire(run.TenantID) {
+			continue
+		}
 		claimed, err := d.store.ClaimRun(ctx, run.ID)
 		if err != nil {
 			log.Printf("dispatcher: claim run %s: %v", run.ID, err)
+			d.release(run.TenantID)
 			continue
 		}
 		if !claimed {
+			d.release(run.TenantID)
 			continue
 		}
 		d.wg.Add(1)
 		go func(run domain.Run) {
 			defer d.wg.Done()
+			defer d.release(run.TenantID)
 			d.drive(ctx, run)
 		}(run)
+	}
+}
+
+func (d *Dispatcher) acquire(tenantID string) bool {
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	limit := d.limits[tenantID]
+	if limit == nil {
+		limit = &tenantLimit{tokens: 1, last: time.Now()}
+		d.limits[tenantID] = limit
+	}
+	if limit.inflight >= d.opts.TenantConcurrency {
+		return false
+	}
+	if d.opts.TenantRate > 0 {
+		now := time.Now()
+		limit.tokens += now.Sub(limit.last).Seconds() * d.opts.TenantRate
+		if limit.tokens > 1 {
+			limit.tokens = 1
+		}
+		limit.last = now
+		if limit.tokens < 1 {
+			return false
+		}
+		limit.tokens--
+	}
+	limit.inflight++
+	return true
+}
+
+func (d *Dispatcher) release(tenantID string) {
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	if limit := d.limits[tenantID]; limit != nil && limit.inflight > 0 {
+		limit.inflight--
 	}
 }
 
