@@ -254,6 +254,97 @@ func (s *Store) MarkRunFailed(ctx context.Context, id string, reason domain.Term
 	return nil
 }
 
+func (s *Store) RequestCancel(ctx context.Context, id string) (domain.Run, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	run, err := scanRun(tx.QueryRow(ctx,
+		runColumns+` from runs where id::text = $1 and tenant_id = $2 for update`,
+		id, tenantID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Run{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.Run{}, err
+	}
+
+	switch run.Status {
+	case domain.RunCompleted, domain.RunFailed, domain.RunCancelled:
+		return domain.Run{}, domain.ErrConflict
+	case domain.RunWaitingHuman:
+		tag, err := tx.Exec(ctx,
+			`update runs set status = 'cancelled', terminal_reason = $3, cancel_requested = true,
+			        pending_step = null, human_prompt = '', deadline = null,
+			        attempt = 0, next_attempt_at = null, ended_at = now(), updated_at = now()
+			 where id::text = $1 and tenant_id = $2 and status = 'waiting_human'`,
+			id, tenantID, string(domain.ReasonCancelledByTenant))
+		if err != nil {
+			return domain.Run{}, err
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.Run{}, domain.ErrConflict
+		}
+	default:
+		tag, err := tx.Exec(ctx,
+			`update runs set cancel_requested = true, updated_at = now()
+			 where id::text = $1 and tenant_id = $2`,
+			id, tenantID)
+		if err != nil {
+			return domain.Run{}, err
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.Run{}, domain.ErrNotFound
+		}
+	}
+
+	run, err = scanRun(tx.QueryRow(ctx,
+		runColumns+` from runs where id::text = $1 and tenant_id = $2`,
+		id, tenantID))
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Run{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) CancelRequested(ctx context.Context, id string) (bool, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return false, err
+	}
+	var requested bool
+	err = s.pool.QueryRow(ctx,
+		`select cancel_requested from runs where id::text = $1 and tenant_id = $2`,
+		id, tenantID,
+	).Scan(&requested)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, domain.ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return requested, nil
+}
+
+// MarkCancelled is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) MarkCancelled(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`update runs set status = 'cancelled', terminal_reason = $2, cancel_requested = true,
+		        ended_at = now(), updated_at = now()
+		 where id::text = $1 and status in ('queued', 'running')`,
+		id, string(domain.ReasonCancelledByTenant))
+	return err
+}
+
 func (s *Store) EnterHumanReview(ctx context.Context, id string, attempt int, pendingStep json.RawMessage, prompt string, deadline time.Time) error {
 	tenantID, err := TenantOf(ctx)
 	if err != nil {

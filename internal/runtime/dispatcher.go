@@ -96,6 +96,9 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 		if ctx.Err() != nil {
 			return
 		}
+		if d.checkCancel(ctx, run.ID) {
+			return
+		}
 		started := time.Now()
 		req := buildDecision(agent, run, stepIndex, attempt, steps)
 		act, err := d.client.decide(ctx, agent, req)
@@ -429,6 +432,21 @@ func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) 
 		return false
 	}
 	return waitUntil(ctx, next)
+}
+
+func (d *Dispatcher) checkCancel(ctx context.Context, runID string) bool {
+	requested, err := d.store.CancelRequested(ctx, runID)
+	if err != nil {
+		log.Printf("runtime: check cancel for run %s: %v", runID, err)
+		return false
+	}
+	if !requested {
+		return false
+	}
+	if err := d.store.MarkCancelled(ctx, runID); err != nil {
+		log.Printf("runtime: mark run %s cancelled: %v", runID, err)
+	}
+	return true
 }
 
 func (d *Dispatcher) fail(ctx context.Context, runID string, reason domain.TerminalReason) {
