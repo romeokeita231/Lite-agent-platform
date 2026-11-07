@@ -96,9 +96,11 @@ func run() error {
 	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
 	tools := toolgw.New(store, cfg.StepTimeout)
 	dispatcher := agentruntime.New(store, gateway, tools, agentruntime.Options{
-		StepTimeout:     cfg.StepTimeout,
-		MaxStepAttempts: cfg.MaxStepAttempts,
-		PollInterval:    cfg.PollInterval,
+		StepTimeout:       cfg.StepTimeout,
+		MaxStepAttempts:   cfg.MaxStepAttempts,
+		PollInterval:      cfg.PollInterval,
+		TenantConcurrency: cfg.TenantConcurrency,
+		TenantRate:        cfg.TenantRate,
 	})
 	go dispatcher.Run(ctx)
 
