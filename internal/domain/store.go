@@ -41,4 +41,8 @@ type Store interface {
 	ListTools(ctx context.Context) ([]Tool, error)
 	GetTool(ctx context.Context, toolName, version string) (Tool, error)
 	CompleteToolCallStep(ctx context.Context, checkpoint Checkpoint, span Span, invocation ToolInvocation) error
+	ListToolInvocations(ctx context.Context, runID string) ([]ToolInvocation, error)
+	CreateEvalReport(ctx context.Context, report EvalReport) (EvalReport, error)
+	GetEvalReport(ctx context.Context, id string) (EvalReport, error)
+	FinishEvalReport(ctx context.Context, id, status string, results json.RawMessage, endedAt time.Time) error
 }
