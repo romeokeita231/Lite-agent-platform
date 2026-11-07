@@ -11,7 +11,6 @@ import (
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
-	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 type Readiness interface {
@@ -89,7 +88,7 @@ func (a *API) authenticated(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal", "tenant lookup failed")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(repository.WithTenant(r.Context(), tenant.ID)))
+		next.ServeHTTP(w, r.WithContext(domain.WithTenant(r.Context(), tenant.ID)))
 	})
 }
 
@@ -109,7 +108,7 @@ func (a *API) createAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name, policy_url and secret_env are required")
 		return
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return
@@ -163,7 +162,7 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 	if len(req.Input) == 0 {
 		req.Input = json.RawMessage("{}")
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return
@@ -193,7 +192,7 @@ func (a *API) submitHumanInput(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return

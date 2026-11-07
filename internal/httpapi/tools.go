@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
-	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 type createToolRequest struct {
@@ -37,7 +36,7 @@ func (a *API) createTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "schema must be an object")
 		return
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return

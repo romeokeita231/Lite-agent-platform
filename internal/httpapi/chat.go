@@ -8,7 +8,6 @@ import (
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
-	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 type chatCompletionResponse struct {
@@ -77,7 +76,7 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		extra[key] = value
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return

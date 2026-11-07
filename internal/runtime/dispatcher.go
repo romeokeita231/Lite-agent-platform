@@ -14,7 +14,6 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
-	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 type Options struct {
@@ -125,7 +124,7 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		if !d.acquire(run.TenantID) {
 			continue
 		}
-		claimed, err := d.store.ClaimRun(repository.WithTenant(ctx, run.TenantID), run.ID)
+		claimed, err := d.store.ClaimRun(domain.WithTenant(ctx, run.TenantID), run.ID)
 		if err != nil {
 			log.Printf("dispatcher: claim run %s: %v", run.ID, err)
 			d.release(run.TenantID)
@@ -211,7 +210,7 @@ func (d *Dispatcher) release(tenantID string) {
 }
 
 func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
-	ctx = repository.WithTenant(ctx, run.TenantID)
+	ctx = domain.WithTenant(ctx, run.TenantID)
 	held := true
 	release := func() {
 		if held {

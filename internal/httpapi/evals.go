@@ -12,7 +12,6 @@ import (
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
-	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
 const (
@@ -96,7 +95,7 @@ func (a *API) createEval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "cases must not be empty")
 		return
 	}
-	tenantID, err := repository.TenantOf(r.Context())
+	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
 		return
