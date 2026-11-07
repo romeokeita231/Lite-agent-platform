@@ -9,10 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
 const signatureWindow = 5 * time.Minute
+
+var slowToolDelay = 30 * time.Second
 
 type message struct {
 	Role    string `json:"role"`
@@ -28,12 +31,23 @@ func main() {
 	if secret == "" {
 		log.Fatal("policy-example: POLICY_SECRET is required")
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /internal/policy/decide", decideHandler(secret))
 	log.Printf("policy-example listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, newMux(secret)); err != nil {
 		log.Fatalf("policy-example: %v", err)
 	}
+}
+
+func newMux(secret string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("POST /internal/policy/decide", decideHandler(secret))
+	mux.HandleFunc("POST /v1/chat/completions", chatCompletionsHandler)
+	mux.HandleFunc("POST /demo/tool/echo", echoHandler)
+	mux.HandleFunc("POST /demo/tool/slow", slowHandler)
+	return mux
 }
 
 func decideHandler(secret string) http.HandlerFunc {
@@ -62,8 +76,8 @@ func decideHandler(secret string) http.HandlerFunc {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		var request struct {
+			Agent     string          `json:"agent"`
 			StepIndex int             `json:"step_index"`
 			Input     json.RawMessage `json:"input"`
 		}
@@ -71,45 +85,93 @@ func decideHandler(secret string) http.HandlerFunc {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		if request.StepIndex == 0 {
-			model := os.Getenv("POLICY_MODEL")
-			if model == "" {
-				model = "route:default"
-			}
+		writeJSON(w, http.StatusOK, decideAction(request.Agent, request.StepIndex, request.Input))
+	}
+}
+
+func decideAction(agent string, stepIndex int, input json.RawMessage) map[string]any {
+	switch {
+	case strings.HasPrefix(agent, "tool-slow"):
+		if stepIndex == 0 {
+			return map[string]any{"action": "tool_call", "tool": "slow", "args": map[string]any{}}
+		}
+	case strings.HasPrefix(agent, "human"):
+		if stepIndex == 0 {
+			return map[string]any{"action": "human_review", "prompt": "approve?", "deadline_seconds": 60}
+		}
+	default:
+		switch stepIndex {
+		case 0:
 			content := "hello"
-			var input struct {
+			var body struct {
 				Question string `json:"question"`
 			}
-			if len(request.Input) > 0 && json.Unmarshal(request.Input, &input) == nil && input.Question != "" {
-				content = input.Question
+			if len(input) > 0 && json.Unmarshal(input, &body) == nil && body.Question != "" {
+				content = body.Question
 			}
-			reply := struct {
-				Action   string    `json:"action"`
-				Route    string    `json:"route"`
-				Messages []message `json:"messages"`
-			}{
-				Action:   "llm_call",
-				Route:    model,
-				Messages: []message{{Role: "user", Content: content}},
+			route := os.Getenv("POLICY_MODEL")
+			if route == "" {
+				route = "route:default"
 			}
-			_ = json.NewEncoder(w).Encode(reply)
-			return
+			return map[string]any{"action": "llm_call", "route": route,
+				"messages": []message{{Role: "user", Content: content}}}
+		case 1:
+			return map[string]any{"action": "tool_call", "tool": "echo", "args": map[string]any{"message": "hello"}}
+		case 2:
+			return map[string]any{"action": "human_review", "prompt": "approve?", "deadline_seconds": 60}
 		}
-		if request.StepIndex == 1 {
-			reply := struct {
-				Action          string  `json:"action"`
-				Prompt          string  `json:"prompt"`
-				DeadlineSeconds float64 `json:"deadline_seconds"`
-			}{
-				Action:          "human_review",
-				Prompt:          "approve?",
-				DeadlineSeconds: 60,
-			}
-			_ = json.NewEncoder(w).Encode(reply)
-			return
-		}
-		_, _ = w.Write([]byte(`{"action":"done","output":{"answer":"done"}}`))
 	}
+	return map[string]any{"action": "done", "output": map[string]any{"answer": "done"}}
+}
+
+func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Model    string    `json:"model"`
+		Messages []message `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if request.Model == "" {
+		request.Model = "demo-model"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      "chatcmpl-demo",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   request.Model,
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       map[string]string{"role": "assistant", "content": "demo model reply"},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]int{
+			"prompt_tokens":     10,
+			"completion_tokens": 5,
+			"total_tokens":      15,
+		},
+	})
+}
+
+func echoHandler(w http.ResponseWriter, r *http.Request) {
+	var args json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"echo": args})
+}
+
+func slowHandler(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(slowToolDelay)
+	writeJSON(w, http.StatusOK, map[string]any{"slept_seconds": slowToolDelay.Seconds()})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func sign(secret, method, path string, body []byte, timestamp string) string {

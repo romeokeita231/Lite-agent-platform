@@ -41,6 +41,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "seed" {
+		if err := runSeed(os.Stdout); err != nil {
+			log.Fatalf("platform seed: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("platform: %v", err)
 	}

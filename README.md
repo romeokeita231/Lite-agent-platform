@@ -13,10 +13,10 @@ It is all Go, and the policy is a separate Go binary talking the same HTTP contr
 split is not about languages — it is about the platform never executing someone else's
 code in its own process. See [ADR 0008](docs/adr/0008-go-for-platform-and-policy.md).
 
-> **Status: design settled, not implemented.** No code exists. Decisions are in
-> [`docs/adr/`](docs/adr/); shared vocabulary in [`GLOSSARY.md`](GLOSSARY.md). What gets
-> built, and when, is still open — this repository currently answers *what it would be*,
-> not *what exists*.
+> **Status: implemented and runnable.** The platform, the example policy and a local
+> demo stack exist in this repository. Decisions live in
+> [`docs/adr/`](docs/adr/) and win wherever they disagree with the code; shared
+> vocabulary in [`GLOSSARY.md`](GLOSSARY.md).
 
 ## How a run works
 
@@ -41,6 +41,37 @@ Six lines. If any of them ever disagree with an ADR, the ADR wins.
 - Not a billing system: it collects usage, it does not invoice.
 - Not polyglot. There is one toolchain here on purpose; the boundary that matters is a
   process boundary, not a language boundary.
+
+## Local demo
+
+`docker compose up --build` starts PostgreSQL, `platform` and `policy-example`. The
+platform container runs `platform seed` before the server: it creates tenants `demo-a`
+and `demo-b`, the agents `demo`, `tool-slow` and `human`, the `default` model route
+(`demo-model`) and the `echo`/`slow` tools. Seeding is idempotent and prints one JSON
+line with both tenant IDs, their plaintext API keys and the policy URL; those keys are
+printed nowhere else.
+
+```sh
+cp .env.example .env
+docker compose up --build
+```
+
+`MODEL_BASE_URL` defaults to `policy-example`'s own OpenAI-compatible
+`/v1/chat/completions` stub, so every demo run performs a real HTTP model call. Point it
+at another OpenAI-compatible provider and set `MODEL_API_KEY` to use that provider
+instead.
+
+Three PowerShell scripts demonstrate the isolation properties in
+[ADR 0012](docs/adr/0012-one-binary-split-ready.md):
+
+| script | shows |
+| --- | --- |
+| `scripts/demo-1-concurrency.ps1` | tenant A saturates its concurrency limit; tenant B's run is not queued behind it |
+| `scripts/demo-2-tool-hang.ps1` | a hung tool endpoint fails one run after `STEP_TIMEOUT`; the other runs complete |
+| `scripts/demo-3-crash.ps1` | killing the policy shows retries and `policy_unreachable`; killing the platform mid-run resumes from the ledger |
+
+Each accepts `-BaseUrl`, `-ApiKeyA` and `-ApiKeyB` (matching the seed output), and exits
+non-zero on failure, e.g. `powershell -File scripts/demo-1-concurrency.ps1`.
 
 ## Documents
 
