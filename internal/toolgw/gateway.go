@@ -13,16 +13,22 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
+	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 )
 
 type Client struct {
 	store      domain.Store
 	timeout    time.Duration
 	httpClient *http.Client
+	metrics    *observability.Metrics
 }
 
 func New(store domain.Store, timeout time.Duration) *Client {
 	return &Client{store: store, timeout: timeout, httpClient: &http.Client{}}
+}
+
+func (c *Client) SetMetrics(metrics *observability.Metrics) {
+	c.metrics = metrics
 }
 
 func (c *Client) Resolve(ctx context.Context, toolName, version string) (domain.Tool, error) {
@@ -55,7 +61,16 @@ func (c *Client) Validate(tool domain.Tool, args json.RawMessage) error {
 	return nil
 }
 
-func (c *Client) Invoke(ctx context.Context, tool domain.Tool, args json.RawMessage, idempotencyKey string) (json.RawMessage, error) {
+func (c *Client) Invoke(ctx context.Context, tool domain.Tool, args json.RawMessage, idempotencyKey string) (result json.RawMessage, err error) {
+	if c.metrics != nil {
+		defer func() {
+			status := "ok"
+			if err != nil {
+				status = "error"
+			}
+			c.metrics.ToolCalls.WithLabelValues(status).Inc()
+		}()
+	}
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
+	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 )
 
 type Client struct {
@@ -20,6 +21,7 @@ type Client struct {
 	apiKey     string
 	budget     time.Duration
 	httpClient *http.Client
+	metrics    *observability.Metrics
 }
 
 func New(baseURL, apiKey string, budget time.Duration) *Client {
@@ -34,6 +36,10 @@ func NewWithStore(store domain.Store, baseURL, apiKey string, budget time.Durati
 		budget:     budget,
 		httpClient: &http.Client{},
 	}
+}
+
+func (c *Client) SetMetrics(metrics *observability.Metrics) {
+	c.metrics = metrics
 }
 
 func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.ModelResult, error) {
@@ -70,6 +76,9 @@ func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.
 		attemptStarted := time.Now()
 		content, inputTokens, outputTokens, callErr := c.callModel(callCtx, model, req)
 		attemptEnded := time.Now()
+		if c.metrics != nil {
+			c.metrics.ModelCallDuration.Observe(attemptEnded.Sub(attemptStarted).Seconds())
+		}
 		attempt := domain.ModelAttempt{
 			Model:     model,
 			Attempt:   index + 1,

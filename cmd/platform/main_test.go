@@ -87,7 +87,7 @@ func TestReadinessFlipsWithDatabaseRecovery(t *testing.T) {
 		t.Fatal("readiness is true while the database is unreachable")
 	}
 
-	srv := httptest.NewServer(httpapi.NewMux(ready, nil, nil, ready))
+	srv := httptest.NewServer(httpapi.NewMux(ready, nil, nil, ready, nil))
 	defer srv.Close()
 
 	if status := getStatus(t, srv.URL+"/healthz"); status != http.StatusOK {

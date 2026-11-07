@@ -195,6 +195,28 @@ func (s *Store) ResetRunningRuns(ctx context.Context) error {
 	return err
 }
 
+// CountRunsByStatus is a metrics method that intentionally ignores the tenant filter.
+func (s *Store) CountRunsByStatus(ctx context.Context) (map[domain.RunStatus]int64, error) {
+	rows, err := s.pool.Query(ctx, `select status, count(*) from runs group by status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[domain.RunStatus]int64)
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[domain.RunStatus(status)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 // ListRunnableRuns is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) ListRunnableRuns(ctx context.Context) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx,

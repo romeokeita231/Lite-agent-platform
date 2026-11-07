@@ -93,8 +93,11 @@ func run() error {
 	maint := &dbMaintenance{pool: pool, ready: ready, migrated: true}
 	go maint.loop(ctx, maintenanceInterval)
 
+	metrics := observability.NewMetrics()
 	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
+	gateway.SetMetrics(metrics)
 	tools := toolgw.New(store, cfg.StepTimeout)
+	tools.SetMetrics(metrics)
 	dispatcher := agentruntime.New(store, gateway, tools, agentruntime.Options{
 		StepTimeout:       cfg.StepTimeout,
 		MaxStepAttempts:   cfg.MaxStepAttempts,
@@ -103,10 +106,11 @@ func run() error {
 		TenantRate:        cfg.TenantRate,
 		ContextRecent:     cfg.ContextRecent,
 		ContextMaxKeep:    cfg.ContextMaxKeep,
+		Metrics:           metrics,
 	})
 	go dispatcher.Run(ctx)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, gateway)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, metrics.Handler(), gateway)}
 
 	serveErr := make(chan error, 1)
 	go func() {

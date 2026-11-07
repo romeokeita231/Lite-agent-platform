@@ -54,7 +54,7 @@ func newAPI(t *testing.T) *apiEnv {
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}))
+	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, nil))
 	t.Cleanup(env2.srv.Close)
 	return env2
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
 	"github.com/romeokeita231/Lite-agent-platform/internal/modelgw"
+	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
@@ -123,6 +124,7 @@ type env struct {
 	store          *repository.Store
 	gateway        domain.ModelGateway
 	tools          domain.ToolGateway
+	metrics        *observability.Metrics
 	options        agentruntime.Options
 	stopDispatcher func()
 }
@@ -153,7 +155,31 @@ func newEnvWithRoutes(t *testing.T, baseURL string, maxAttempts int, stepTimeout
 
 func newEnvFromStore(t *testing.T, base *testutil.Env, store *repository.Store, gateway domain.ModelGateway, maxAttempts int, stepTimeout time.Duration) *env {
 	t.Helper()
-	tools := toolgw.New(store, stepTimeout)
+	return newEnvWithRuntimeOptions(t, base, store, gateway, agentruntime.Options{
+		StepTimeout:     stepTimeout,
+		MaxStepAttempts: maxAttempts,
+		PollInterval:    10 * time.Millisecond,
+	})
+}
+
+func newEnvWithRuntimeOptions(t *testing.T, base *testutil.Env, store *repository.Store, gateway domain.ModelGateway, options agentruntime.Options) *env {
+	t.Helper()
+	if options.StepTimeout == 0 {
+		options.StepTimeout = 2 * time.Second
+	}
+	if options.MaxStepAttempts == 0 {
+		options.MaxStepAttempts = 3
+	}
+	if options.PollInterval == 0 {
+		options.PollInterval = 10 * time.Millisecond
+	}
+	tools := toolgw.New(store, options.StepTimeout)
+	metrics := observability.NewMetrics()
+	tools.SetMetrics(metrics)
+	if client, ok := gateway.(interface{ SetMetrics(*observability.Metrics) }); ok {
+		client.SetMetrics(metrics)
+	}
+	options.Metrics = metrics
 	e := &env{
 		env: base,
 		keys: map[string]string{
@@ -163,11 +189,8 @@ func newEnvFromStore(t *testing.T, base *testutil.Env, store *repository.Store, 
 		store:   store,
 		gateway: gateway,
 		tools:   tools,
-		options: agentruntime.Options{
-			StepTimeout:     stepTimeout,
-			MaxStepAttempts: maxAttempts,
-			PollInterval:    10 * time.Millisecond,
-		},
+		metrics: metrics,
+		options: options,
 	}
 	for tenantID, key := range e.keys {
 		ctx := repository.WithTenant(context.Background(), tenantID)
@@ -180,7 +203,7 @@ func newEnvFromStore(t *testing.T, base *testutil.Env, store *repository.Store, 
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}, gateway))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}, metrics.Handler(), gateway))
 	t.Cleanup(e.srv.Close)
 
 	e.startDispatcher(t)
