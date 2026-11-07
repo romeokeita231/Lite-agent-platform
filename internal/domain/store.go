@@ -16,6 +16,7 @@ type Store interface {
 	CreateRun(ctx context.Context, run Run) (Run, error)
 	GetRun(ctx context.Context, id string) (Run, error)
 	GetSteps(ctx context.Context, runID string) ([]Checkpoint, error)
+	ResetRunningRuns(ctx context.Context) error
 	ListRunnableRuns(ctx context.Context) ([]Run, error)
 	ClaimRun(ctx context.Context, id string) (bool, error)
 	RescheduleStep(ctx context.Context, id string, attempt int, nextAttemptAt time.Time) error

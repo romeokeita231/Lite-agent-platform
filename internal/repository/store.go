@@ -187,6 +187,14 @@ func (s *Store) GetAgent(ctx context.Context, id string) (domain.Agent, error) {
 	return agent, nil
 }
 
+// ResetRunningRuns is a startup recovery method that intentionally ignores the tenant filter.
+func (s *Store) ResetRunningRuns(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx,
+		`update runs set status = 'queued', attempt = 0, next_attempt_at = null, updated_at = now()
+		 where status = 'running'`)
+	return err
+}
+
 // ListRunnableRuns is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) ListRunnableRuns(ctx context.Context) ([]domain.Run, error) {
 	rows, err := s.pool.Query(ctx,
