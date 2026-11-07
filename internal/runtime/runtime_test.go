@@ -28,6 +28,8 @@ type alwaysReady struct{}
 
 func (alwaysReady) Ready() bool { return true }
 
+func (alwaysReady) Draining() bool { return false }
+
 type ledgerStepPayload struct {
 	StepIndex int             `json:"step_index"`
 	StepType  string          `json:"step_type"`
@@ -166,7 +168,7 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}))
 	t.Cleanup(e.srv.Close)
 
 	e.startDispatcher(t)

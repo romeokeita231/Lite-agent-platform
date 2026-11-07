@@ -18,14 +18,19 @@ type Readiness interface {
 	Ready() bool
 }
 
-type API struct {
-	store domain.Store
-	tools domain.ToolGateway
+type Draining interface {
+	Draining() bool
 }
 
-func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway) *http.ServeMux {
+type API struct {
+	store    domain.Store
+	tools    domain.ToolGateway
+	draining Draining
+}
+
+func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, draining Draining) *http.ServeMux {
 	mux := http.NewServeMux()
-	api := &API{store: store, tools: tools}
+	api := &API{store: store, tools: tools, draining: draining}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -128,6 +133,10 @@ type createRunRequest struct {
 }
 
 func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
+	if a.draining != nil && a.draining.Draining() {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "platform is shutting down")
+		return
+	}
 	var req createRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")

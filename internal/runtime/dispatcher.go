@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
@@ -21,25 +22,54 @@ type Options struct {
 }
 
 type Dispatcher struct {
-	store   domain.Store
-	gateway domain.ModelGateway
-	tools   domain.ToolGateway
-	opts    Options
-	client  *policyClient
-	wg      sync.WaitGroup
+	store    domain.Store
+	gateway  domain.ModelGateway
+	tools    domain.ToolGateway
+	opts     Options
+	client   *policyClient
+	wg       sync.WaitGroup
+	stopped  atomic.Bool
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
 }
 
 func New(store domain.Store, gateway domain.ModelGateway, tools domain.ToolGateway, opts Options) *Dispatcher {
-	return &Dispatcher{store: store, gateway: gateway, tools: tools, opts: opts, client: newPolicyClient(opts.StepTimeout)}
+	return &Dispatcher{
+		store:   store,
+		gateway: gateway,
+		tools:   tools,
+		opts:    opts,
+		client:  newPolicyClient(opts.StepTimeout),
+		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (d *Dispatcher) Stop(wait time.Duration) {
+	d.stopOnce.Do(func() {
+		d.stopped.Store(true)
+		close(d.stopCh)
+	})
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-d.done:
+	case <-timer.C:
+	}
 }
 
 func (d *Dispatcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(d.opts.PollInterval)
 	defer ticker.Stop()
+	defer close(d.done)
 	for {
 		d.tick(ctx)
 		select {
 		case <-ctx.Done():
+			d.wg.Wait()
+			return
+		case <-d.stopCh:
 			d.wg.Wait()
 			return
 		case <-ticker.C:
@@ -48,6 +78,9 @@ func (d *Dispatcher) Run(ctx context.Context) {
 }
 
 func (d *Dispatcher) tick(ctx context.Context) {
+	if d.stopped.Load() {
+		return
+	}
 	if err := d.store.FailExpiredHumanWaits(ctx); err != nil {
 		log.Printf("dispatcher: fail expired human waits: %v", err)
 	}
@@ -57,7 +90,7 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		return
 	}
 	for _, run := range runs {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || d.stopped.Load() {
 			return
 		}
 		claimed, err := d.store.ClaimRun(ctx, run.ID)
@@ -93,7 +126,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 	attempt := run.Attempt
 	stepIndex := len(steps)
 	for {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || d.stopped.Load() {
 			return
 		}
 		if d.checkCancel(ctx, run.ID) {
@@ -431,7 +464,24 @@ func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) 
 		d.fail(ctx, runID, domain.ReasonMaxRetries)
 		return false
 	}
-	return waitUntil(ctx, next)
+	return d.waitUntil(ctx, next)
+}
+
+func (d *Dispatcher) waitUntil(ctx context.Context, at time.Time) bool {
+	wait := time.Until(at)
+	if wait <= 0 {
+		return ctx.Err() == nil && !d.stopped.Load()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-d.stopCh:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (d *Dispatcher) checkCancel(ctx context.Context, runID string) bool {
@@ -492,19 +542,4 @@ func backoff(attempt int) time.Duration {
 		return 30 * time.Second
 	}
 	return duration
-}
-
-func waitUntil(ctx context.Context, at time.Time) bool {
-	wait := time.Until(at)
-	if wait <= 0 {
-		return ctx.Err() == nil
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
