@@ -95,6 +95,19 @@ func decideHandler(secret string) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(reply)
 			return
 		}
+		if request.StepIndex == 1 {
+			reply := struct {
+				Action          string  `json:"action"`
+				Prompt          string  `json:"prompt"`
+				DeadlineSeconds float64 `json:"deadline_seconds"`
+			}{
+				Action:          "human_review",
+				Prompt:          "approve?",
+				DeadlineSeconds: 60,
+			}
+			_ = json.NewEncoder(w).Encode(reply)
+			return
+		}
 		_, _ = w.Write([]byte(`{"action":"done","output":{"answer":"done"}}`))
 	}
 }

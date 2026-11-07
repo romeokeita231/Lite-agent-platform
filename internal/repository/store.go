@@ -155,28 +155,14 @@ func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 	if err != nil {
 		return domain.Run{}, err
 	}
-	var run domain.Run
-	var status string
-	var terminalReason *string
-	err = s.pool.QueryRow(ctx,
-		`select id::text, tenant_id, agent_id, status, input, output, attempt, next_attempt_at,
-		        pending_step, human_prompt, deadline, terminal_reason, eval_id,
-		        created_at, updated_at, ended_at
-		 from runs where id::text = $1 and tenant_id = $2`,
-		id, tenantID,
-	).Scan(&run.ID, &run.TenantID, &run.AgentID, &status, &run.Input, &run.Output,
-		&run.Attempt, &run.NextAttemptAt, &run.PendingStep, &run.HumanPrompt, &run.Deadline,
-		&terminalReason, &run.EvalID, &run.CreatedAt, &run.UpdatedAt, &run.EndedAt)
+	run, err := scanRun(s.pool.QueryRow(ctx,
+		runColumns+` from runs where id::text = $1 and tenant_id = $2`,
+		id, tenantID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Run{}, domain.ErrNotFound
 	}
 	if err != nil {
 		return domain.Run{}, err
-	}
-	run.Status = domain.RunStatus(status)
-	if terminalReason != nil {
-		reason := domain.TerminalReason(*terminalReason)
-		run.TerminalReason = &reason
 	}
 	return run, nil
 }
@@ -266,6 +252,110 @@ func (s *Store) MarkRunFailed(ctx context.Context, id string, reason domain.Term
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) EnterHumanReview(ctx context.Context, id string, attempt int, pendingStep json.RawMessage, prompt string, deadline time.Time) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx,
+		`update runs set status = 'waiting_human', pending_step = $2, human_prompt = $3, deadline = $4,
+		        attempt = $5, next_attempt_at = null, updated_at = now()
+		 where id::text = $1 and tenant_id = $6 and status = 'running'`,
+		id, pendingStep, prompt, deadline, attempt, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SubmitHumanInput(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span) (domain.Run, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if checkpoint.TenantID != tenantID || span.TenantID != tenantID {
+		return domain.Run{}, domain.ErrNotFound
+	}
+	attributes := span.Attributes
+	if len(attributes) == 0 {
+		attributes = json.RawMessage("{}")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`select status from runs where id::text = $1 and tenant_id = $2 for update`,
+		checkpoint.RunID, tenantID,
+	).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Run{}, domain.ErrNotFound
+		}
+		return domain.Run{}, err
+	}
+	var pendingIndex int
+	if err := tx.QueryRow(ctx,
+		`select coalesce(max(step_index) + 1, 0) from checkpoints
+		 where run_id::text = $1 and tenant_id = $2`,
+		checkpoint.RunID, tenantID,
+	).Scan(&pendingIndex); err != nil {
+		return domain.Run{}, err
+	}
+	if domain.RunStatus(status) != domain.RunWaitingHuman || pendingIndex != checkpoint.StepIndex {
+		return domain.Run{}, domain.ErrConflict
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
+		 values ($1::uuid, $2, $3, $4, $5, $6)`,
+		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
+	); err != nil {
+		return domain.Run{}, uniqueToConflict(err)
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+	); err != nil {
+		return domain.Run{}, err
+	}
+	tag, err := tx.Exec(ctx,
+		`update runs set status = 'queued', pending_step = null, human_prompt = '', deadline = null,
+		        attempt = 0, next_attempt_at = null, updated_at = now()
+		 where id::text = $1 and tenant_id = $2 and status = 'waiting_human'`,
+		checkpoint.RunID, tenantID)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.Run{}, domain.ErrConflict
+	}
+	run, err := scanRun(tx.QueryRow(ctx,
+		runColumns+` from runs where id::text = $1 and tenant_id = $2`,
+		checkpoint.RunID, tenantID))
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Run{}, err
+	}
+	return run, nil
+}
+
+// FailExpiredHumanWaits is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) FailExpiredHumanWaits(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx,
+		`update runs set status = 'failed', terminal_reason = $1, ended_at = now(), updated_at = now()
+		 where status = 'waiting_human' and deadline < now()`,
+		string(domain.ReasonStepTimeout))
+	return err
 }
 
 func (s *Store) GetSteps(ctx context.Context, runID string) ([]domain.Checkpoint, error) {
@@ -579,6 +669,28 @@ func (s *Store) CompleteToolCallStep(ctx context.Context, checkpoint domain.Chec
 		return domain.ErrNotFound
 	}
 	return tx.Commit(ctx)
+}
+
+const runColumns = `select id::text, tenant_id, agent_id, status, input, output, attempt, next_attempt_at,
+	        pending_step, human_prompt, deadline, terminal_reason, eval_id,
+	        created_at, updated_at, ended_at`
+
+func scanRun(row pgx.Row) (domain.Run, error) {
+	var run domain.Run
+	var status string
+	var terminalReason *string
+	err := row.Scan(&run.ID, &run.TenantID, &run.AgentID, &status, &run.Input, &run.Output,
+		&run.Attempt, &run.NextAttemptAt, &run.PendingStep, &run.HumanPrompt, &run.Deadline,
+		&terminalReason, &run.EvalID, &run.CreatedAt, &run.UpdatedAt, &run.EndedAt)
+	if err != nil {
+		return domain.Run{}, err
+	}
+	run.Status = domain.RunStatus(status)
+	if terminalReason != nil {
+		reason := domain.TerminalReason(*terminalReason)
+		run.TerminalReason = &reason
+	}
+	return run, nil
 }
 
 func modelChainJSON(chain []string) ([]byte, error) {
