@@ -550,6 +550,65 @@ func TestGetStepsOrderingAndTenantScope(t *testing.T) {
 	}
 }
 
+func TestListSpansOrderingAndTenantScope(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	seed := []struct {
+		id    string
+		start time.Time
+	}{
+		{"00000000-0000-4000-8000-000000000001", base},
+		{"00000000-0000-4000-8000-000000000002", base},
+		{"00000000-0000-4000-8000-000000000003", base.Add(-time.Second)},
+	}
+	for i, span := range seed {
+		if _, err := env.Pool.Exec(context.Background(),
+			`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+			 values ($1::uuid, 'tenant-a', $2::uuid, 0, $3, $4, $5, $5, '{}', '')`,
+			span.id, run.ID, i, "span"+span.id, span.start); err != nil {
+			t.Fatalf("seed span %s: %v", span.id, err)
+		}
+	}
+	if _, err := env.Pool.Exec(context.Background(),
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at)
+		 values ($1::uuid, 'tenant-b', $2::uuid, 0, 0, 'foreign', $3, $3)`,
+		ids.New(), run.ID, base); err != nil {
+		t.Fatalf("seed foreign span: %v", err)
+	}
+
+	spans, err := store.ListSpans(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("list spans: %v", err)
+	}
+	if len(spans) != 3 {
+		t.Fatalf("spans = %+v", spans)
+	}
+	want := []string{
+		"00000000-0000-4000-8000-000000000003",
+		"00000000-0000-4000-8000-000000000001",
+		"00000000-0000-4000-8000-000000000002",
+	}
+	for i, id := range want {
+		if spans[i].ID != id || spans[i].RunID == nil || *spans[i].RunID != run.ID {
+			t.Fatalf("span %d = %+v, want id %s", i, spans[i], id)
+		}
+	}
+	if _, err := store.ListSpans(ctxB, run.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant list spans error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListSpans(ctxA, ids.New()); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing list spans error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.ListSpans(context.Background(), run.ID); !errors.Is(err, domain.ErrNoTenant) {
+		t.Fatalf("list spans without tenant error = %v, want ErrNoTenant", err)
+	}
+}
+
 func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
 	env := testutil.New(t)
 	store := repository.New(env.Pool)
