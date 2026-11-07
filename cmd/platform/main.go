@@ -1,0 +1,105 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/romeokeita231/Lite-agent-platform/internal/config"
+	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
+	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
+	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
+)
+
+const (
+	dbCheckTimeout      = 5 * time.Second
+	maintenanceInterval = time.Second
+)
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatalf("platform: %v", err)
+	}
+}
+
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	ready := observability.NewReadiness()
+	maint := &dbMaintenance{pool: pool, ready: ready}
+	maint.check(ctx)
+	go maint.loop(ctx, maintenanceInterval)
+
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready)}
+
+	go func() {
+		<-ctx.Done()
+		ready.SetReady(false)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+	}()
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+type dbMaintenance struct {
+	pool     *pgxpool.Pool
+	ready    *observability.Readiness
+	migrated bool
+}
+
+func (d *dbMaintenance) check(ctx context.Context) {
+	checkCtx, cancel := context.WithTimeout(ctx, dbCheckTimeout)
+	defer cancel()
+
+	if err := d.pool.Ping(checkCtx); err != nil {
+		d.ready.SetReady(false)
+		return
+	}
+	if !d.migrated {
+		if err := migrate.Run(checkCtx, d.pool); err != nil {
+			d.ready.SetReady(false)
+			return
+		}
+		d.migrated = true
+	}
+	d.ready.SetReady(true)
+}
+
+func (d *dbMaintenance) loop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.check(ctx)
+		}
+	}
+}
