@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -96,7 +97,8 @@ func run() error {
 	store := repository.New(pool)
 
 	ready := observability.NewReadiness()
-	maint := &dbMaintenance{pool: pool, ready: ready, recover: true}
+	dispatcherStarted := make(chan struct{})
+	maint := &dbMaintenance{pool: pool, ready: ready, recover: true, started: dispatcherStarted}
 
 	metrics := observability.NewMetrics()
 	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
@@ -113,7 +115,13 @@ func run() error {
 		ContextMaxKeep:    cfg.ContextMaxKeep,
 		Metrics:           metrics,
 	})
-	go dispatcher.Run(ctx)
+	go func() {
+		select {
+		case <-dispatcherStarted:
+			dispatcher.Run(ctx)
+		case <-ctx.Done():
+		}
+	}()
 
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, metrics.Handler(), gateway)}
 
@@ -156,6 +164,8 @@ type dbMaintenance struct {
 	ready    *observability.Readiness
 	migrated bool
 	recover  bool
+	started  chan struct{}
+	startOne sync.Once
 }
 
 func (d *dbMaintenance) check(ctx context.Context) {
@@ -178,11 +188,15 @@ func (d *dbMaintenance) check(ctx context.Context) {
 			}
 		}
 		d.migrated = true
+		if d.started != nil {
+			d.startOne.Do(func() { close(d.started) })
+		}
 	}
 	d.ready.SetReady(true)
 }
 
 func (d *dbMaintenance) loop(ctx context.Context, interval time.Duration) {
+	d.check(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

@@ -308,7 +308,12 @@ func buildPlatform(t *testing.T) string {
 		t.Fatal("cannot locate test file")
 	}
 	root := filepath.Dir(filepath.Dir(filepath.Dir(file)))
-	bin := filepath.Join(t.TempDir(), "platform")
+	dir, err := os.MkdirTemp("", "platform-bin-")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	bin := filepath.Join(dir, "platform")
 	if goruntime.GOOS == "windows" {
 		bin += ".exe"
 	}
