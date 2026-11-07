@@ -59,9 +59,15 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if contextRecent <= 0 {
+		return Config{}, fmt.Errorf("CONTEXT_RECENT must be a positive integer")
+	}
 	contextMaxKeep, err := intEnv("CONTEXT_MAX_KEEP", 16)
 	if err != nil {
 		return Config{}, err
+	}
+	if contextMaxKeep <= 0 {
+		return Config{}, fmt.Errorf("CONTEXT_MAX_KEEP must be a positive integer")
 	}
 	pollInterval, err := durationEnv("POLL_INTERVAL", 100*time.Millisecond)
 	if err != nil {

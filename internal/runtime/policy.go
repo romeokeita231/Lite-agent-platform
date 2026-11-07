@@ -16,19 +16,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/romeokeita231/Lite-agent-platform/internal/contextwin"
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 )
 
-type ledgerStep struct {
-	StepIndex int             `json:"step_index"`
-	StepType  string          `json:"step_type"`
-	Result    json.RawMessage `json:"result"`
-}
-
 type ledger struct {
-	Recent  []ledgerStep `json:"recent"`
-	Summary string       `json:"summary"`
-	Dropped []int        `json:"dropped"`
+	Recent  []contextwin.Step `json:"recent"`
+	Summary string            `json:"summary"`
+	Dropped []int             `json:"dropped"`
 }
 
 type decisionRequest struct {
@@ -50,6 +45,7 @@ type action struct {
 	Args            json.RawMessage
 	Prompt          string
 	DeadlineSeconds *float64
+	Keep            []int
 }
 
 type stepFailure struct {
@@ -157,6 +153,7 @@ func parseAction(body []byte) (action, error) {
 		Args     json.RawMessage `json:"args"`
 		Prompt   json.RawMessage `json:"prompt"`
 		Deadline json.RawMessage `json:"deadline_seconds"`
+		Keep     json.RawMessage `json:"keep"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return invalid("invalid policy response JSON")
@@ -164,6 +161,12 @@ func parseAction(body []byte) (action, error) {
 	var kind string
 	if len(raw.Action) == 0 || json.Unmarshal(raw.Action, &kind) != nil || kind == "" {
 		return invalid("missing action")
+	}
+	var keep []int
+	if len(raw.Keep) > 0 && string(raw.Keep) != "null" {
+		if err := json.Unmarshal(raw.Keep, &keep); err != nil {
+			return invalid("keep must be an array of integers")
+		}
 	}
 	switch domain.StepType(kind) {
 	case domain.StepDone:
@@ -175,7 +178,7 @@ func parseAction(body []byte) (action, error) {
 		if err := json.Unmarshal(output, &object); err != nil {
 			return invalid("done output must be an object")
 		}
-		return action{Kind: kind, Output: output}, nil
+		return action{Kind: kind, Output: output, Keep: keep}, nil
 	case domain.StepLLMCall:
 		var route string
 		if len(raw.Route) == 0 || json.Unmarshal(raw.Route, &route) != nil || route == "" {
@@ -185,7 +188,7 @@ func parseAction(body []byte) (action, error) {
 		if err != nil {
 			return invalid(err.Error())
 		}
-		return action{Kind: kind, Route: route, Messages: messages}, nil
+		return action{Kind: kind, Route: route, Messages: messages, Keep: keep}, nil
 	case domain.StepToolCall:
 		var tool string
 		if len(raw.Tool) == 0 || json.Unmarshal(raw.Tool, &tool) != nil || tool == "" {
@@ -204,7 +207,7 @@ func parseAction(body []byte) (action, error) {
 		if err := json.Unmarshal(raw.Args, &args); err != nil {
 			return invalid("tool_call args must be an object")
 		}
-		return action{Kind: kind, Tool: tool, Version: version, Args: raw.Args}, nil
+		return action{Kind: kind, Tool: tool, Version: version, Args: raw.Args, Keep: keep}, nil
 	case domain.StepHumanReview:
 		var prompt string
 		if len(raw.Prompt) == 0 || json.Unmarshal(raw.Prompt, &prompt) != nil || prompt == "" {
@@ -218,7 +221,7 @@ func parseAction(body []byte) (action, error) {
 			}
 			deadline = &seconds
 		}
-		return action{Kind: kind, Prompt: prompt, DeadlineSeconds: deadline}, nil
+		return action{Kind: kind, Prompt: prompt, DeadlineSeconds: deadline, Keep: keep}, nil
 	default:
 		return invalid("unsupported action " + kind)
 	}

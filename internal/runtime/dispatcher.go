@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/romeokeita231/Lite-agent-platform/internal/contextwin"
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
@@ -21,6 +22,8 @@ type Options struct {
 	PollInterval      time.Duration
 	TenantConcurrency int
 	TenantRate        float64
+	ContextRecent     int
+	ContextMaxKeep    int
 }
 
 type tenantLimit struct {
@@ -50,6 +53,12 @@ func New(store domain.Store, gateway domain.ModelGateway, tools domain.ToolGatew
 	}
 	if opts.TenantRate < 0 {
 		opts.TenantRate = 0
+	}
+	if opts.ContextRecent <= 0 {
+		opts.ContextRecent = 8
+	}
+	if opts.ContextMaxKeep <= 0 {
+		opts.ContextMaxKeep = 16
 	}
 	return &Dispatcher{
 		store:   store,
@@ -191,7 +200,8 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			return
 		}
 		started := time.Now()
-		req := buildDecision(agent, run, stepIndex, attempt, steps)
+		view := buildView(steps, d.opts)
+		req := buildDecision(agent, run, stepIndex, attempt, view)
 		act, err := d.client.decide(ctx, agent, req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -216,9 +226,10 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 		switch domain.StepType(act.Kind) {
 		case domain.StepDone:
 			finished := time.Now()
-			result, err := json.Marshal(struct {
-				Output json.RawMessage `json:"output"`
-			}{Output: act.Output})
+			result, err := json.Marshal(doneResult{
+				Output: act.Output,
+				Keep:   act.Keep,
+			})
 			if err != nil {
 				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 				return
@@ -241,7 +252,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				Name:       "step.done",
 				StartedAt:  started,
 				EndedAt:    finished,
-				Attributes: json.RawMessage(`{}`),
+				Attributes: contextAttributes(view),
 			}
 			if err := d.store.CompleteRunStep(ctx, checkpoint, span, act.Output); err != nil {
 				if ctx.Err() != nil {
@@ -283,7 +294,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				LatencyMS:      modelResult.LatencyMS,
 				Status:         modelResult.Status,
 			}
-			spans := modelAttemptSpans(run, act.Route, stepIndex, attempt, modelResult.Attempts)
+			spans := modelAttemptSpans(run, act.Route, stepIndex, attempt, modelResult.Attempts, view)
 			if callErr != nil {
 				if ctx.Err() != nil {
 					return
@@ -320,6 +331,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 					InputTokens  int `json:"input_tokens"`
 					OutputTokens int `json:"output_tokens"`
 				}{InputTokens: modelResult.InputTokens, OutputTokens: modelResult.OutputTokens},
+				Keep: act.Keep,
 			})
 			if err != nil {
 				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
@@ -392,15 +404,18 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				Version: tool.Version,
 				Args:    act.Args,
 				Result:  toolResult,
+				Keep:    act.Keep,
 			})
 			if err != nil {
 				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 				return
 			}
 			attributes, _ := json.Marshal(map[string]any{
-				"tool":    tool.ToolName,
-				"version": tool.Version,
-				"attempt": attempt,
+				"tool":                  tool.ToolName,
+				"version":               tool.Version,
+				"attempt":               attempt,
+				"context_tokens":        view.Tokens,
+				"context_dropped_steps": view.DroppedSteps,
 			})
 			checkpoint := domain.Checkpoint{
 				RunID:     run.ID,
@@ -453,9 +468,12 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			continue
 		case domain.StepHumanReview:
 			pendingStep, err := json.Marshal(humanReviewStep{
-				Action:          string(domain.StepHumanReview),
-				Prompt:          act.Prompt,
-				DeadlineSeconds: act.DeadlineSeconds,
+				Action:              string(domain.StepHumanReview),
+				Prompt:              act.Prompt,
+				DeadlineSeconds:     act.DeadlineSeconds,
+				Keep:                act.Keep,
+				ContextTokens:       view.Tokens,
+				ContextDroppedSteps: view.DroppedSteps,
 			})
 			if err != nil {
 				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
@@ -480,16 +498,18 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 	}
 }
 
-func modelAttemptSpans(run domain.Run, requested string, stepIndex, attempt int, attempts []domain.ModelAttempt) []domain.Span {
+func modelAttemptSpans(run domain.Run, requested string, stepIndex, attempt int, attempts []domain.ModelAttempt, view contextwin.View) []domain.Span {
 	runID := run.ID
 	spans := make([]domain.Span, 0, len(attempts))
 	for _, result := range attempts {
 		attributes, _ := json.Marshal(map[string]any{
-			"requested_model": requested,
-			"effective_model": result.Model,
-			"status":          result.Status,
-			"latency_ms":      result.LatencyMS,
-			"attempt":         result.Attempt,
+			"requested_model":       requested,
+			"effective_model":       result.Model,
+			"status":                result.Status,
+			"latency_ms":            result.LatencyMS,
+			"attempt":               result.Attempt,
+			"context_tokens":        view.Tokens,
+			"context_dropped_steps": view.DroppedSteps,
 		})
 		spans = append(spans, domain.Span{
 			ID:         ids.New(),
@@ -508,9 +528,17 @@ func modelAttemptSpans(run domain.Run, requested string, stepIndex, attempt int,
 }
 
 type humanReviewStep struct {
-	Action          string   `json:"action"`
-	Prompt          string   `json:"prompt"`
-	DeadlineSeconds *float64 `json:"deadline_seconds,omitempty"`
+	Action              string   `json:"action"`
+	Prompt              string   `json:"prompt"`
+	DeadlineSeconds     *float64 `json:"deadline_seconds,omitempty"`
+	Keep                []int    `json:"keep,omitempty"`
+	ContextTokens       int      `json:"context_tokens"`
+	ContextDroppedSteps int      `json:"context_dropped_steps"`
+}
+
+type doneResult struct {
+	Output json.RawMessage `json:"output"`
+	Keep   []int           `json:"keep,omitempty"`
 }
 
 type toolCallResult struct {
@@ -518,6 +546,7 @@ type toolCallResult struct {
 	Version string          `json:"version"`
 	Args    json.RawMessage `json:"args"`
 	Result  json.RawMessage `json:"result"`
+	Keep    []int           `json:"keep,omitempty"`
 }
 
 type llmCallResult struct {
@@ -531,6 +560,7 @@ type llmCallResult struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
+	Keep []int `json:"keep,omitempty"`
 }
 
 func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) bool {
@@ -581,15 +611,34 @@ func (d *Dispatcher) fail(ctx context.Context, runID string, reason domain.Termi
 	}
 }
 
-func buildDecision(agent domain.Agent, run domain.Run, stepIndex, attempt int, steps []domain.Checkpoint) decisionRequest {
-	recent := make([]ledgerStep, 0, len(steps))
+func buildView(steps []domain.Checkpoint, opts Options) contextwin.View {
+	ledgerSteps := make([]contextwin.Step, 0, len(steps))
 	for _, checkpoint := range steps {
-		recent = append(recent, ledgerStep{
+		ledgerSteps = append(ledgerSteps, contextwin.Step{
 			StepIndex: checkpoint.StepIndex,
 			StepType:  string(checkpoint.StepType),
 			Result:    checkpoint.Result,
 		})
 	}
+	var keep []int
+	if len(steps) > 0 {
+		keep = contextwin.KeepOf(steps[len(steps)-1].Result)
+	}
+	return contextwin.Build(ledgerSteps, keep, contextwin.Config{
+		Recent:  opts.ContextRecent,
+		MaxKeep: opts.ContextMaxKeep,
+	})
+}
+
+func contextAttributes(view contextwin.View) json.RawMessage {
+	attributes, _ := json.Marshal(map[string]any{
+		"context_tokens":        view.Tokens,
+		"context_dropped_steps": view.DroppedSteps,
+	})
+	return attributes
+}
+
+func buildDecision(agent domain.Agent, run domain.Run, stepIndex, attempt int, view contextwin.View) decisionRequest {
 	input := run.Input
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
@@ -600,7 +649,7 @@ func buildDecision(agent domain.Agent, run domain.Run, stepIndex, attempt int, s
 		StepIndex: stepIndex,
 		Attempt:   attempt,
 		Input:     input,
-		Ledger:    ledger{Recent: recent, Summary: "", Dropped: []int{}},
+		Ledger:    ledger{Recent: view.Recent, Summary: view.Summary, Dropped: view.Dropped},
 	}
 }
 
