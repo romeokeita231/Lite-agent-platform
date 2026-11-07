@@ -95,6 +95,10 @@ func decideHandler(secret string) http.HandlerFunc {
 
 func decideAction(agent string, stepIndex int, input json.RawMessage) map[string]any {
 	switch {
+	case strings.HasPrefix(agent, "quick"):
+		if stepIndex == 0 {
+			return map[string]any{"action": "done", "output": map[string]any{"answer": "quick"}}
+		}
 	case strings.HasPrefix(agent, "tool-slow"):
 		if stepIndex == 0 {
 			return map[string]any{"action": "tool_call", "tool": "slow", "args": map[string]any{}}

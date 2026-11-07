@@ -19,7 +19,7 @@ function Get-AuthHeaders([string]$Key) {
 }
 
 function Get-AgentId([string]$Base, [string]$Key, [string]$Name) {
-    $agents = @(Invoke-RestMethod -Uri "$Base/v1/agents" -Method Get -Headers (Get-AuthHeaders $Key))
+    $agents = @(Invoke-RestMethod -Uri "$Base/v1/agents" -Method Get -Headers (Get-AuthHeaders $Key) | ForEach-Object { $_ })
     $agent = $agents | Where-Object { $_.name -eq $Name } | Select-Object -First 1
     if (-not $agent) {
         throw "agent '$Name' not found; start the stack so 'platform seed' runs first"
@@ -36,7 +36,7 @@ function New-DemoRun([string]$Base, [string]$Key, [string]$AgentId, [string]$Que
 function Step-Run([string]$Base, [string]$Key, [string]$RunId) {
     $run = Invoke-RestMethod -Uri "$Base/v1/runs/$RunId" -Headers (Get-AuthHeaders $Key)
     if ($run.status -eq 'waiting_human') {
-        $steps = @(Invoke-RestMethod -Uri "$Base/v1/runs/$RunId/steps" -Headers (Get-AuthHeaders $Key))
+        $steps = @(Invoke-RestMethod -Uri "$Base/v1/runs/$RunId/steps" -Headers (Get-AuthHeaders $Key) | ForEach-Object { $_ })
         $body = @{ step_index = $steps.Count; input = @{ approved = $true } } | ConvertTo-Json -Depth 5
         Invoke-RestMethod -Uri "$Base/v1/runs/$RunId/human-input" -Method Post `
             -Headers (Get-AuthHeaders $Key) -ContentType 'application/json' -Body $body | Out-Null

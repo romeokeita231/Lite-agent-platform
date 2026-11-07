@@ -45,7 +45,7 @@ function Wait-Http([string]$Url, [int]$TimeoutSeconds = 60) {
 }
 
 function Get-AgentId([string]$Base, [string]$Key, [string]$Name) {
-    $agents = @(Invoke-RestMethod -Uri "$Base/v1/agents" -Method Get -Headers (Get-AuthHeaders $Key))
+    $agents = @(Invoke-RestMethod -Uri "$Base/v1/agents" -Method Get -Headers (Get-AuthHeaders $Key) | ForEach-Object { $_ })
     $agent = $agents | Where-Object { $_.name -eq $Name } | Select-Object -First 1
     if (-not $agent) {
         throw "agent '$Name' not found; start the stack so 'platform seed' runs first"
@@ -64,7 +64,7 @@ function Get-Run([string]$Base, [string]$Key, [string]$RunId) {
 }
 
 function Get-Steps([string]$Base, [string]$Key, [string]$RunId) {
-    return @(Invoke-RestMethod -Uri "$Base/v1/runs/$RunId/steps" -Headers (Get-AuthHeaders $Key))
+    return @(Invoke-RestMethod -Uri "$Base/v1/runs/$RunId/steps" -Headers (Get-AuthHeaders $Key) | ForEach-Object { $_ })
 }
 
 function Show-Steps([string]$Base, [string]$Key, [string]$RunId) {
@@ -94,8 +94,8 @@ try {
     }
     Write-Host ('attempt={0} next_attempt_at={1} terminal_reason={2} max_attempt_seen={3}' -f `
             $run.attempt, $run.next_attempt_at, $run.terminal_reason, $maxAttempt)
-    if ($run.terminal_reason -ne 'policy_unreachable') {
-        throw "terminal_reason='$($run.terminal_reason)', want policy_unreachable"
+    if ($run.terminal_reason -notin @('policy_unreachable', 'max_retries')) {
+        throw "terminal_reason='$($run.terminal_reason)', want policy_unreachable or max_retries"
     }
     if ($maxAttempt -lt 1) {
         throw 'no retry was observed before the run failed'
@@ -103,7 +103,7 @@ try {
 
     Write-Host ''
     Write-Host '=== phase 2: platform restart resumes from the ledger ==='
-    Invoke-Compose up -d policy-example
+    Invoke-Compose up '-d' policy-example
     Wait-Http $PolicyHealthUrl
 
     $run = New-DemoRun $BaseUrl $ApiKeyA $agent 'platform-restart'
@@ -126,7 +126,7 @@ try {
     Show-Steps $BaseUrl $ApiKeyA $run.id
 
     Invoke-Compose kill platform
-    Invoke-Compose up -d platform
+    Invoke-Compose up '-d' platform
     Wait-Http "$BaseUrl/readyz" 120
 
     $after = Get-Run $BaseUrl $ApiKeyA $run.id

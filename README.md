@@ -45,7 +45,8 @@ Six lines. If any of them ever disagree with an ADR, the ADR wins.
 
 `docker compose up --build` 启动 PostgreSQL、`platform` 和 `policy-example`。平台容器
 在启动服务前执行 `platform seed`：创建租户 `demo-a` 和 `demo-b`，Agent `demo`、
-`tool-slow`、`human`，`default` 模型路由（`demo-model`），以及 `echo`/`slow` 工具。
+`tool-slow`、`human`、`quick`，`default`/`cheap`/`fast` 模型路由（`demo-model`），以及
+`echo`/`slow` 工具。
 seed 是幂等的，并输出一行 JSON，包含两个租户 ID、各自的明文 API key 和 policy URL；
 这些 key 不会在别处打印。
 

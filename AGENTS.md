@@ -21,9 +21,10 @@ See `docs/agents/domain.md`.
 
 ## Status
 
-Design settled, implementation not started. The 22 ADRs under `docs/adr/` are the spec and
-`README.md` is the entry point. Read the ADR covering the area before proposing a change to
-it, and say which ADR a change contradicts.
+Implementation complete and runnable: the platform, example Policy and local demo stack
+live in this repo. The 25 ADRs under `docs/adr/` remain the spec and `README.md` is the
+entry point. Read the ADR covering the area before proposing a change to it, and say which
+ADR a change contradicts.
 
 ## Language
 

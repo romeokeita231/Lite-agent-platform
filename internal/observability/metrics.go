@@ -57,7 +57,7 @@ func NewMetrics() *Metrics {
 		ContextTokens: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "platform_context_tokens",
 			Help:    "Estimated context tokens per ledger build.",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768},
 		}),
 		ContextDroppedSteps: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "platform_context_dropped_steps_total",
@@ -66,7 +66,7 @@ func NewMetrics() *Metrics {
 		TenantInflight: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "platform_tenant_inflight",
 			Help:    "Distribution of in-flight runs per tenant.",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32},
 		}),
 	}
 	m.ToolCalls.WithLabelValues("ok")

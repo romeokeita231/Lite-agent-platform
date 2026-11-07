@@ -121,6 +121,7 @@ func seedAgents(ctx context.Context, pool *pgxpool.Pool, tenantID, policyURL str
 		{name: "demo", secret: "POLICY_SECRET_DEMO"},
 		{name: "tool-slow", secret: "POLICY_SECRET_TOOL_SLOW"},
 		{name: "human", secret: "POLICY_SECRET_HUMAN"},
+		{name: "quick", secret: "POLICY_SECRET_DEMO"},
 	}
 	names := make([]string, 0, len(agents))
 	for _, agent := range agents {
