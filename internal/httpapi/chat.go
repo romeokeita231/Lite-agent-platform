@@ -92,10 +92,6 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "model or route not found")
 		return
 	}
-	if callErr != nil {
-		writeError(w, http.StatusBadGateway, "unavailable", "model upstream failed")
-		return
-	}
 
 	log := domain.ModelCallLog{
 		TenantID:       tenantID,
@@ -132,6 +128,10 @@ func (a *API) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.RecordModelCallAttempts(r.Context(), spans, log); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "record model call failed")
+		return
+	}
+	if callErr != nil {
+		writeError(w, http.StatusBadGateway, "unavailable", "model upstream failed")
 		return
 	}
 

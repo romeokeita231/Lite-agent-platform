@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,12 +53,19 @@ func main() {
 	}
 }
 
-func keygen(w io.Writer) error {
+func newAPIKey() (string, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func keygen(w io.Writer) error {
+	apiKey, err := newAPIKey()
+	if err != nil {
 		return err
 	}
-	apiKey := hex.EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(apiKey))
 	payload := struct {
 		APIKey       string `json:"api_key"`
@@ -87,17 +95,10 @@ func run() error {
 	defer pool.Close()
 
 	store := repository.New(pool)
-	if err := migrate.Run(ctx, pool); err != nil {
-		return err
-	}
-	if err := store.ResetRunningRuns(ctx); err != nil {
-		return err
-	}
 
 	ready := observability.NewReadiness()
-	ready.SetReady(true)
-	maint := &dbMaintenance{pool: pool, ready: ready, migrated: true}
-	go maint.loop(ctx, maintenanceInterval)
+	dispatcherStarted := make(chan struct{})
+	maint := &dbMaintenance{pool: pool, ready: ready, recover: true, started: dispatcherStarted}
 
 	metrics := observability.NewMetrics()
 	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
@@ -114,7 +115,13 @@ func run() error {
 		ContextMaxKeep:    cfg.ContextMaxKeep,
 		Metrics:           metrics,
 	})
-	go dispatcher.Run(ctx)
+	go func() {
+		select {
+		case <-dispatcherStarted:
+			dispatcher.Run(ctx)
+		case <-ctx.Done():
+		}
+	}()
 
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, metrics.Handler(), gateway)}
 
@@ -122,6 +129,7 @@ func run() error {
 	go func() {
 		serveErr <- server.ListenAndServe()
 	}()
+	go maint.loop(ctx, maintenanceInterval)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -155,6 +163,9 @@ type dbMaintenance struct {
 	pool     *pgxpool.Pool
 	ready    *observability.Readiness
 	migrated bool
+	recover  bool
+	started  chan struct{}
+	startOne sync.Once
 }
 
 func (d *dbMaintenance) check(ctx context.Context) {
@@ -170,12 +181,22 @@ func (d *dbMaintenance) check(ctx context.Context) {
 			d.ready.SetReady(false)
 			return
 		}
+		if d.recover {
+			if err := repository.New(d.pool).ResetRunningRuns(checkCtx); err != nil {
+				d.ready.SetReady(false)
+				return
+			}
+		}
 		d.migrated = true
+		if d.started != nil {
+			d.startOne.Do(func() { close(d.started) })
+		}
 	}
 	d.ready.SetReady(true)
 }
 
 func (d *dbMaintenance) loop(ctx context.Context, interval time.Duration) {
+	d.check(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

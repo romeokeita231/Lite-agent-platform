@@ -125,7 +125,7 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		if !d.acquire(run.TenantID) {
 			continue
 		}
-		claimed, err := d.store.ClaimRun(ctx, run.ID)
+		claimed, err := d.store.ClaimRun(repository.WithTenant(ctx, run.TenantID), run.ID)
 		if err != nil {
 			log.Printf("dispatcher: claim run %s: %v", run.ID, err)
 			d.release(run.TenantID)
@@ -138,7 +138,6 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		d.wg.Add(1)
 		go func(run domain.Run) {
 			defer d.wg.Done()
-			defer d.release(run.TenantID)
 			d.drive(ctx, run)
 		}(run)
 	}
@@ -213,6 +212,14 @@ func (d *Dispatcher) release(tenantID string) {
 
 func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 	ctx = repository.WithTenant(ctx, run.TenantID)
+	held := true
+	release := func() {
+		if held {
+			d.release(run.TenantID)
+			held = false
+		}
+	}
+	defer release()
 	agent, err := d.store.GetAgent(ctx, run.AgentID)
 	if err != nil {
 		log.Printf("runtime: load agent for run %s: %v", run.ID, err)
@@ -227,6 +234,29 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 	}
 	attempt := run.Attempt
 	stepIndex := len(steps)
+	reacquire := func() bool {
+		if !d.acquireBlocking(ctx, run.TenantID) {
+			return false
+		}
+		held = true
+		return true
+	}
+	retry := func(attempt int) bool {
+		if d.opts.Metrics != nil {
+			d.opts.Metrics.StepRetries.Inc()
+		}
+		next := time.Now().Add(backoff(attempt))
+		if err := d.store.RescheduleStep(ctx, run.ID, attempt, next); err != nil {
+			log.Printf("runtime: reschedule run %s: %v", run.ID, err)
+			d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+			return false
+		}
+		release()
+		if !d.waitUntil(ctx, next) {
+			return false
+		}
+		return reacquire()
+	}
 	for {
 		if ctx.Err() != nil || d.stopped.Load() {
 			return
@@ -256,7 +286,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				d.fail(ctx, run.ID, failure.reason)
 				return
 			}
-			if !d.retryLater(ctx, run.ID, attempt) {
+			if !retry(attempt) {
 				return
 			}
 			continue
@@ -303,7 +333,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
 					return
 				}
-				if !d.retryLater(ctx, run.ID, attempt) {
+				if !retry(attempt) {
 					return
 				}
 				continue
@@ -345,10 +375,14 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				}
 				attempt++
 				if attempt >= d.opts.MaxStepAttempts {
-					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					reason := domain.ReasonMaxRetries
+					if errors.Is(callErr, context.DeadlineExceeded) {
+						reason = domain.ReasonStepTimeout
+					}
+					d.fail(ctx, run.ID, reason)
 					return
 				}
-				if !d.retryLater(ctx, run.ID, attempt) {
+				if !retry(attempt) {
 					return
 				}
 				continue
@@ -356,9 +390,6 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 
 			var fallbackFrom *string
 			if modelResult.FallbackFrom != "" {
-				if d.opts.Metrics != nil {
-					d.opts.Metrics.ModelFallbacks.Inc()
-				}
 				value := modelResult.FallbackFrom
 				fallbackFrom = &value
 			}
@@ -397,7 +428,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
 					return
 				}
-				if !d.retryLater(ctx, run.ID, attempt) {
+				if !retry(attempt) {
 					return
 				}
 				continue
@@ -405,6 +436,10 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			steps = append(steps, checkpoint)
 			stepIndex++
 			attempt = 0
+			release()
+			if !reacquire() {
+				return
+			}
 			continue
 		case domain.StepToolCall:
 			tool, err := d.tools.Resolve(ctx, act.Tool, act.Version)
@@ -432,10 +467,14 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				}
 				attempt++
 				if attempt >= d.opts.MaxStepAttempts {
-					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					reason := domain.ReasonMaxRetries
+					if errors.Is(callErr, context.DeadlineExceeded) {
+						reason = domain.ReasonStepTimeout
+					}
+					d.fail(ctx, run.ID, reason)
 					return
 				}
-				if !d.retryLater(ctx, run.ID, attempt) {
+				if !retry(attempt) {
 					return
 				}
 				continue
@@ -499,7 +538,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
 					return
 				}
-				if !d.retryLater(ctx, run.ID, attempt) {
+				if !retry(attempt) {
 					return
 				}
 				continue
@@ -507,6 +546,10 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			steps = append(steps, checkpoint)
 			stepIndex++
 			attempt = 0
+			release()
+			if !reacquire() {
+				return
+			}
 			continue
 		case domain.StepHumanReview:
 			pendingStep, err := json.Marshal(humanReviewStep{
@@ -605,17 +648,24 @@ type llmCallResult struct {
 	Keep []int `json:"keep,omitempty"`
 }
 
-func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) bool {
-	if d.opts.Metrics != nil {
-		d.opts.Metrics.StepRetries.Inc()
+func (d *Dispatcher) acquireBlocking(ctx context.Context, tenantID string) bool {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil || d.stopped.Load() {
+			return false
+		}
+		if d.acquire(tenantID) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-d.stopCh:
+			return false
+		case <-ticker.C:
+		}
 	}
-	next := time.Now().Add(backoff(attempt))
-	if err := d.store.RescheduleStep(ctx, runID, attempt, next); err != nil {
-		log.Printf("runtime: reschedule run %s: %v", runID, err)
-		d.fail(ctx, runID, domain.ReasonMaxRetries)
-		return false
-	}
-	return d.waitUntil(ctx, next)
 }
 
 func (d *Dispatcher) waitUntil(ctx context.Context, at time.Time) bool {

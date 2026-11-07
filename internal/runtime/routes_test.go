@@ -302,6 +302,25 @@ func TestRouteChainExhaustedBy5xxCallsEachModelOnce(t *testing.T) {
 	}
 }
 
+func TestModelTimeoutExhaustedReportsStepTimeout(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	upstream := newRoutedUpstream(t, map[string]http.HandlerFunc{
+		"m1": func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() },
+	})
+	policy := newPolicyServerFunc(t, secret, func(request policyRequest) string {
+		return `{"action":"llm_call","route":"route:cheap","messages":[{"role":"user","content":"hi"}]}`
+	})
+	e := newEnvWithRoutes(t, upstream.baseURL(), 1, 200*time.Millisecond, 200*time.Millisecond)
+	e.putRoutes(t, "tenant-a", map[string][]string{"cheap": {"m1"}})
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+	failed := e.waitRun(t, "tenant-a", run.ID, domain.RunFailed, 5*time.Second)
+	if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonStepTimeout {
+		t.Fatalf("terminal reason = %v, want step_timeout", failed.TerminalReason)
+	}
+}
+
 func TestUnknownRouteFailsWithoutCallingUpstream(t *testing.T) {
 	const secret = "runtime-secret"
 	t.Setenv("POLICY_SECRET_ALPHA", secret)

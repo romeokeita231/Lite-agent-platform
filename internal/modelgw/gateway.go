@@ -73,6 +73,9 @@ func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.
 		if callCtx.Err() != nil {
 			break
 		}
+		if index > 0 && c.metrics != nil {
+			c.metrics.ModelFallbacks.Inc()
+		}
 		attemptStarted := time.Now()
 		content, inputTokens, outputTokens, callErr := c.callModel(callCtx, model, req)
 		attemptEnded := time.Now()

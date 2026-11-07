@@ -257,7 +257,7 @@ func TestRunsAreTenantScoped(t *testing.T) {
 	}
 }
 
-func TestDispatcherRunAccessIgnoresTenantFilter(t *testing.T) {
+func TestDispatcherRunAccessIsTenantScoped(t *testing.T) {
 	env := testutil.New(t)
 	store := repository.New(env.Pool)
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
@@ -286,14 +286,21 @@ func TestDispatcherRunAccessIgnoresTenantFilter(t *testing.T) {
 		t.Fatalf("runnable runs = %+v", runs)
 	}
 
-	claimed, err := store.ClaimRun(context.Background(), runA.ID)
+	claimed, err := store.ClaimRun(ctxA, runB.ID)
+	if err != nil {
+		t.Fatalf("cross-tenant claim run b: %v", err)
+	}
+	if claimed {
+		t.Fatalf("cross-tenant claim of run b succeeded")
+	}
+	claimed, err = store.ClaimRun(ctxA, runA.ID)
 	if err != nil {
 		t.Fatalf("claim run a: %v", err)
 	}
 	if !claimed {
 		t.Fatalf("first claim of run a failed")
 	}
-	claimed, err = store.ClaimRun(context.Background(), runA.ID)
+	claimed, err = store.ClaimRun(ctxA, runA.ID)
 	if err != nil {
 		t.Fatalf("second claim run a: %v", err)
 	}
@@ -310,6 +317,76 @@ func TestDispatcherRunAccessIgnoresTenantFilter(t *testing.T) {
 	}
 }
 
+func TestDispatcherMutationsAreTenantScoped(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+
+	runA := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	runB := createTestRun(t, store, ctxB, "tenant-b", "agent-b")
+	for _, item := range []struct {
+		id  string
+		ctx context.Context
+	}{{runA.ID, ctxA}, {runB.ID, ctxB}} {
+		claimed, err := store.ClaimRun(item.ctx, item.id)
+		if err != nil || !claimed {
+			t.Fatalf("claim run %s: claimed=%v err=%v", item.id, claimed, err)
+		}
+	}
+
+	if err := store.RescheduleStep(ctxB, runA.ID, 5, time.Now().Add(time.Hour)); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant reschedule error = %v, want ErrNotFound", err)
+	}
+	gotA, err := store.GetRun(ctxA, runA.ID)
+	if err != nil {
+		t.Fatalf("get run a: %v", err)
+	}
+	if gotA.Attempt != 0 || gotA.NextAttemptAt != nil {
+		t.Fatalf("cross-tenant reschedule changed run a: %+v", gotA)
+	}
+
+	if err := store.MarkRunFailed(ctxB, runA.ID, domain.ReasonMaxRetries); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant mark failed error = %v, want ErrNotFound", err)
+	}
+	gotA, err = store.GetRun(ctxA, runA.ID)
+	if err != nil {
+		t.Fatalf("get run a after cross-tenant fail: %v", err)
+	}
+	if gotA.Status != domain.RunRunning || gotA.TerminalReason != nil {
+		t.Fatalf("cross-tenant fail changed run a: %+v", gotA)
+	}
+
+	if err := store.MarkCancelled(ctxB, runA.ID); err != nil {
+		t.Fatalf("cross-tenant mark cancelled: %v", err)
+	}
+	gotA, err = store.GetRun(ctxA, runA.ID)
+	if err != nil {
+		t.Fatalf("get run a after cross-tenant cancel: %v", err)
+	}
+	if gotA.Status != domain.RunRunning {
+		t.Fatalf("cross-tenant cancel changed run a: %+v", gotA)
+	}
+
+	if err := store.MarkCancelled(ctxA, runA.ID); err != nil {
+		t.Fatalf("mark cancelled run a: %v", err)
+	}
+	gotA, err = store.GetRun(ctxA, runA.ID)
+	if err != nil {
+		t.Fatalf("get run a after cancel: %v", err)
+	}
+	if gotA.Status != domain.RunCancelled {
+		t.Fatalf("run a after cancel = %+v", gotA)
+	}
+	gotB, err := store.GetRun(ctxB, runB.ID)
+	if err != nil {
+		t.Fatalf("get run b: %v", err)
+	}
+	if gotB.Status != domain.RunRunning {
+		t.Fatalf("run b changed by tenant a mutation: %+v", gotB)
+	}
+}
+
 func TestResetRunningRunsIgnoresTenantFilter(t *testing.T) {
 	env := testutil.New(t)
 	store := repository.New(env.Pool)
@@ -320,13 +397,18 @@ func TestResetRunningRunsIgnoresTenantFilter(t *testing.T) {
 	runB := createTestRun(t, store, ctxB, "tenant-b", "agent-b")
 	finished := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
 
-	for _, id := range []string{runA.ID, runB.ID, finished.ID} {
-		claimed, err := store.ClaimRun(context.Background(), id)
+	for _, item := range []struct {
+		id  string
+		ctx context.Context
+	}{
+		{runA.ID, ctxA}, {runB.ID, ctxB}, {finished.ID, ctxA},
+	} {
+		claimed, err := store.ClaimRun(item.ctx, item.id)
 		if err != nil || !claimed {
-			t.Fatalf("claim run %s: claimed=%v err=%v", id, claimed, err)
+			t.Fatalf("claim run %s: claimed=%v err=%v", item.id, claimed, err)
 		}
 	}
-	if err := store.RescheduleStep(context.Background(), runA.ID, 3, time.Now().Add(time.Hour)); err != nil {
+	if err := store.RescheduleStep(ctxA, runA.ID, 3, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("reschedule run a: %v", err)
 	}
 	if _, err := env.Pool.Exec(context.Background(),
@@ -401,7 +483,7 @@ func TestCompleteRunStepWritesCheckpointSpanAndCompletion(t *testing.T) {
 	store := repository.New(env.Pool)
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
 	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, run.ID); err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
 
@@ -466,7 +548,7 @@ func TestCompleteRunStepRollsBackWhenSpanCannotBeWritten(t *testing.T) {
 	store := repository.New(env.Pool)
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
 	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, run.ID); err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
 
@@ -615,10 +697,10 @@ func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
 	ctxB := repository.WithTenant(context.Background(), "tenant-b")
 	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, run.ID); err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
-	if err := store.RescheduleStep(context.Background(), run.ID, 2, time.Now().Add(time.Hour)); err != nil {
+	if err := store.RescheduleStep(ctxA, run.ID, 2, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("reschedule run: %v", err)
 	}
 
@@ -729,10 +811,10 @@ func TestMarkRunFailedIsIdempotent(t *testing.T) {
 	store := repository.New(env.Pool)
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
 	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, run.ID); err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
-	if err := store.MarkRunFailed(context.Background(), run.ID, domain.ReasonPolicyUnreachable); err != nil {
+	if err := store.MarkRunFailed(ctxA, run.ID, domain.ReasonPolicyUnreachable); err != nil {
 		t.Fatalf("mark run failed: %v", err)
 	}
 	first, err := store.GetRun(ctxA, run.ID)
@@ -744,7 +826,7 @@ func TestMarkRunFailedIsIdempotent(t *testing.T) {
 		t.Fatalf("failed run = %+v", first)
 	}
 
-	if err := store.MarkRunFailed(context.Background(), run.ID, domain.ReasonMaxRetries); !errors.Is(err, domain.ErrNotFound) {
+	if err := store.MarkRunFailed(ctxA, run.ID, domain.ReasonMaxRetries); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("second mark run failed error = %v, want ErrNotFound", err)
 	}
 	second, err := store.GetRun(ctxA, run.ID)

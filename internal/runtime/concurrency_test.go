@@ -8,6 +8,10 @@ import (
 	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
+	"github.com/romeokeita231/Lite-agent-platform/internal/modelgw"
+	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
+	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
+	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
 )
 
 func newLimitedEnv(t *testing.T, concurrency int, rate float64) *env {
@@ -41,6 +45,57 @@ func (e *env) dbRunStatus(t *testing.T, id string) domain.RunStatus {
 		t.Fatalf("read run %s status: %v", id, err)
 	}
 	return domain.RunStatus(status)
+}
+
+func TestBackoffReleasesTenantSlot(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	upstream := newRoutedUpstream(t, map[string]http.HandlerFunc{
+		"m1": statusModel(http.StatusInternalServerError),
+	})
+	policy := newPolicyServerFunc(t, secret, func(request policyRequest) string {
+		var input struct {
+			Mode string `json:"mode"`
+		}
+		_ = json.Unmarshal(request.Input, &input)
+		if input.Mode == "retry" {
+			return `{"action":"llm_call","route":"route:cheap","messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"action":"done","output":{"answer":"done"}}`
+	})
+	base := testutil.New(t)
+	store := repository.New(base.Pool)
+	e := newEnvWithRuntimeOptions(t, base, store,
+		modelgw.NewWithStore(store, upstream.baseURL(), "", 500*time.Millisecond),
+		agentruntime.Options{
+			StepTimeout:       500 * time.Millisecond,
+			MaxStepAttempts:   3,
+			PollInterval:      10 * time.Millisecond,
+			TenantConcurrency: 1,
+		})
+	e.putRoutes(t, "tenant-a", map[string][]string{"cheap": {"m1"}})
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+
+	first := e.submitRunWithInput(t, "tenant-a", agent.ID, map[string]any{"mode": "retry"})
+	deadline := time.Now().Add(3 * time.Second)
+	for e.getRun(t, "tenant-a", first.ID).Attempt == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("first run never entered backoff")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	second := e.submitRunWithInput(t, "tenant-a", agent.ID, map[string]any{"mode": "fast"})
+	start := time.Now()
+	e.waitRun(t, "tenant-a", second.ID, domain.RunCompleted, time.Second)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("second run took %s to complete during first run's backoff", elapsed)
+	}
+
+	failed := e.waitRun(t, "tenant-a", first.ID, domain.RunFailed, 10*time.Second)
+	if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonMaxRetries {
+		t.Fatalf("first run terminal reason = %v, want max_retries", failed.TerminalReason)
+	}
 }
 
 func TestTenantConcurrencyKeepsOverflowQueued(t *testing.T) {

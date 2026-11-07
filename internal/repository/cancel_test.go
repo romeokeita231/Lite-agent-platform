@@ -42,7 +42,7 @@ func TestRequestCancelMarksNonTerminalRuns(t *testing.T) {
 	}
 
 	running := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), running.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, running.ID); err != nil {
 		t.Fatalf("claim running run: %v", err)
 	}
 	updated, err := store.RequestCancel(ctxA, running.ID)
@@ -53,7 +53,7 @@ func TestRequestCancelMarksNonTerminalRuns(t *testing.T) {
 		t.Fatalf("running run after request = %+v", updated)
 	}
 
-	if err := store.MarkCancelled(context.Background(), queued.ID); err != nil {
+	if err := store.MarkCancelled(ctxA, queued.ID); err != nil {
 		t.Fatalf("mark cancelled: %v", err)
 	}
 	final, err := store.GetRun(ctxA, queued.ID)
@@ -178,11 +178,11 @@ func TestMarkCancelledIsIdempotent(t *testing.T) {
 	store := repository.New(env.Pool)
 	ctxA := repository.WithTenant(context.Background(), "tenant-a")
 	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
-	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+	if _, err := store.ClaimRun(ctxA, run.ID); err != nil {
 		t.Fatalf("claim run: %v", err)
 	}
 
-	if err := store.MarkCancelled(context.Background(), run.ID); err != nil {
+	if err := store.MarkCancelled(ctxA, run.ID); err != nil {
 		t.Fatalf("mark cancelled: %v", err)
 	}
 	first, err := store.GetRun(ctxA, run.ID)
@@ -194,7 +194,7 @@ func TestMarkCancelledIsIdempotent(t *testing.T) {
 		t.Fatalf("cancelled run = %+v", first)
 	}
 
-	if err := store.MarkCancelled(context.Background(), run.ID); err != nil {
+	if err := store.MarkCancelled(ctxA, run.ID); err != nil {
 		t.Fatalf("second mark cancelled: %v", err)
 	}
 	second, err := store.GetRun(ctxA, run.ID)
@@ -218,7 +218,7 @@ func TestMarkCancelledIsIdempotent(t *testing.T) {
 		`select updated_at from runs where id::text = $1`, failed.ID).Scan(&before); err != nil {
 		t.Fatalf("read failed updated_at: %v", err)
 	}
-	if err := store.MarkCancelled(context.Background(), failed.ID); err != nil {
+	if err := store.MarkCancelled(ctxA, failed.ID); err != nil {
 		t.Fatalf("mark failed run cancelled: %v", err)
 	}
 	got, err := store.GetRun(ctxA, failed.ID)

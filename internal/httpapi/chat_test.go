@@ -238,6 +238,44 @@ func TestStandaloneChatRejectsUnknownModelRoute(t *testing.T) {
 	}
 }
 
+func TestStandaloneChatFailureWritesDetachedTrace(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream failure", http.StatusInternalServerError)
+	}))
+	t.Cleanup(upstream.Close)
+	api := newModelAPI(t, upstream.URL+"/v1", 2*time.Second)
+	putRoute(t, api, "tenant-a", "default", []string{"m1", "m2"})
+
+	status, raw := api.do(t, http.MethodPost, "/v1/chat/completions", "tenant-a", map[string]any{
+		"model":    "route:default",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if status != http.StatusBadGateway {
+		t.Fatalf("failed chat status = %d body=%s", status, raw)
+	}
+
+	var logCount int
+	if err := api.env.Pool.QueryRow(t.Context(),
+		`select count(*) from model_call_logs where tenant_id = 'tenant-a' and run_id is null and status = 'error'`,
+	).Scan(&logCount); err != nil {
+		t.Fatalf("count failed model call logs: %v", err)
+	}
+	if logCount != 1 {
+		t.Fatalf("failed model call log count = %d, want 1", logCount)
+	}
+
+	var spanCount int
+	var allDetached bool
+	if err := api.env.Pool.QueryRow(t.Context(),
+		`select count(*), bool_and(run_id is null) from spans where tenant_id = 'tenant-a' and name in ('model.m1', 'model.m2')`,
+	).Scan(&spanCount, &allDetached); err != nil {
+		t.Fatalf("count failed spans: %v", err)
+	}
+	if spanCount != 2 || !allDetached {
+		t.Fatalf("failed spans = %d detached=%v, want 2 detached", spanCount, allDetached)
+	}
+}
+
 func TestModelsEndpointListsTenantRoutes(t *testing.T) {
 	api := newModelAPI(t, "http://127.0.0.1:1/v1", 2*time.Second)
 	putRoute(t, api, "tenant-a", "cheap", []string{"m1", "m2"})
