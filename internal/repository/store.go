@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -178,6 +179,183 @@ func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 		run.TerminalReason = &reason
 	}
 	return run, nil
+}
+
+func (s *Store) GetAgent(ctx context.Context, id string) (domain.Agent, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	var agent domain.Agent
+	err = s.pool.QueryRow(ctx,
+		`select id, tenant_id, name, policy_url, secret_env, created_at
+		 from agents where id = $1 and tenant_id = $2`,
+		id, tenantID,
+	).Scan(&agent.ID, &agent.TenantID, &agent.Name, &agent.PolicyURL, &agent.SecretEnv, &agent.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Agent{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	return agent, nil
+}
+
+// ListRunnableRuns is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) ListRunnableRuns(ctx context.Context) ([]domain.Run, error) {
+	rows, err := s.pool.Query(ctx,
+		`select id::text, tenant_id, agent_id, input, attempt
+		 from runs
+		 where status = 'queued' and (next_attempt_at is null or next_attempt_at <= now())
+		 order by created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Run, error) {
+		var run domain.Run
+		err := row.Scan(&run.ID, &run.TenantID, &run.AgentID, &run.Input, &run.Attempt)
+		run.Status = domain.RunQueued
+		return run, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if runs == nil {
+		runs = []domain.Run{}
+	}
+	return runs, nil
+}
+
+// ClaimRun is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) ClaimRun(ctx context.Context, id string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
+		`update runs set status = 'running', updated_at = now()
+		 where id::text = $1 and status = 'queued'`,
+		id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RescheduleStep is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) RescheduleStep(ctx context.Context, id string, attempt int, nextAttemptAt time.Time) error {
+	tag, err := s.pool.Exec(ctx,
+		`update runs set attempt = $2, next_attempt_at = $3, updated_at = now()
+		 where id::text = $1 and status = 'running'`,
+		id, attempt, nextAttemptAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// MarkRunFailed is a dispatcher method that intentionally ignores the tenant filter.
+func (s *Store) MarkRunFailed(ctx context.Context, id string, reason domain.TerminalReason) error {
+	tag, err := s.pool.Exec(ctx,
+		`update runs set status = 'failed', terminal_reason = $2, ended_at = now(), updated_at = now()
+		 where id::text = $1 and status = 'running'`,
+		id, string(reason))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetSteps(ctx context.Context, runID string) ([]domain.Checkpoint, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`select exists(select 1 from runs where id::text = $1 and tenant_id = $2)`,
+		runID, tenantID,
+	).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, domain.ErrNotFound
+	}
+	rows, err := s.pool.Query(ctx,
+		`select run_id::text, tenant_id, step_index, step_type, result, created_at
+		 from checkpoints where tenant_id = $1 and run_id::text = $2
+		 order by step_index asc`,
+		tenantID, runID)
+	if err != nil {
+		return nil, err
+	}
+	steps, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Checkpoint, error) {
+		var checkpoint domain.Checkpoint
+		var stepType string
+		err := row.Scan(&checkpoint.RunID, &checkpoint.TenantID, &checkpoint.StepIndex, &stepType, &checkpoint.Result, &checkpoint.CreatedAt)
+		checkpoint.StepType = domain.StepType(stepType)
+		return checkpoint, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if steps == nil {
+		steps = []domain.Checkpoint{}
+	}
+	return steps, nil
+}
+
+func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span, output json.RawMessage) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if checkpoint.TenantID != tenantID || span.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	if len(output) == 0 {
+		output = json.RawMessage("{}")
+	}
+	attributes := span.Attributes
+	if len(attributes) == 0 {
+		attributes = json.RawMessage("{}")
+	}
+	runID := checkpoint.RunID
+	spanRunID := runID
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
+		 values ($1::uuid, $2, $3, $4, $5, $6)`,
+		runID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+		span.ID, tenantID, spanRunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+	); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx,
+		`update runs set status = 'completed', output = $2, attempt = 0, next_attempt_at = null,
+		        terminal_reason = null, ended_at = now(), updated_at = now()
+		 where id::text = $1 and tenant_id = $3 and status = 'running'`,
+		runID, output, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return tx.Commit(ctx)
 }
 
 func uniqueToConflict(err error) error {

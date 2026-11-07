@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
@@ -42,6 +43,7 @@ func NewMux(ready Readiness, store domain.Store) *http.ServeMux {
 	mux.Handle("GET /v1/agents", api.authenticated(http.HandlerFunc(api.listAgents)))
 	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
+	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
 	return mux
 }
 
@@ -162,6 +164,35 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+type stepResponse struct {
+	StepIndex int             `json:"step_index"`
+	StepType  domain.StepType `json:"step_type"`
+	Result    json.RawMessage `json:"result"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+func (a *API) getRunSteps(w http.ResponseWriter, r *http.Request) {
+	steps, err := a.store.GetSteps(r.Context(), r.PathValue("id"))
+	if errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "get steps failed")
+		return
+	}
+	out := make([]stepResponse, 0, len(steps))
+	for _, step := range steps {
+		out = append(out, stepResponse{
+			StepIndex: step.StepIndex,
+			StepType:  step.StepType,
+			Result:    step.Result,
+			CreatedAt: step.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func bearerToken(header string) (string, bool) {
