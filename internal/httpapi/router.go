@@ -29,7 +29,7 @@ type API struct {
 	draining Draining
 }
 
-func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, draining Draining, gateways ...domain.ModelGateway) *http.ServeMux {
+func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, draining Draining, metrics http.Handler, gateways ...domain.ModelGateway) *http.ServeMux {
 	mux := http.NewServeMux()
 	api := &API{store: store, tools: tools, draining: draining}
 	if len(gateways) > 0 {
@@ -48,6 +48,10 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, drain
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
+
+	if metrics != nil {
+		mux.Handle("GET /metrics", metrics)
+	}
 
 	mux.Handle("POST /v1/agents", api.authenticated(http.HandlerFunc(api.createAgent)))
 	mux.Handle("GET /v1/agents", api.authenticated(http.HandlerFunc(api.listAgents)))

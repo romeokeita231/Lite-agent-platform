@@ -13,6 +13,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/contextwin"
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
+	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 )
 
@@ -24,6 +25,7 @@ type Options struct {
 	TenantRate        float64
 	ContextRecent     int
 	ContextMaxKeep    int
+	Metrics           *observability.Metrics
 }
 
 type tenantLimit struct {
@@ -107,6 +109,7 @@ func (d *Dispatcher) tick(ctx context.Context) {
 	if d.stopped.Load() {
 		return
 	}
+	d.refreshMetrics(ctx)
 	if err := d.store.FailExpiredHumanWaits(ctx); err != nil {
 		log.Printf("dispatcher: fail expired human waits: %v", err)
 	}
@@ -138,6 +141,38 @@ func (d *Dispatcher) tick(ctx context.Context) {
 			defer d.release(run.TenantID)
 			d.drive(ctx, run)
 		}(run)
+	}
+}
+
+var runStatuses = []domain.RunStatus{
+	domain.RunQueued,
+	domain.RunRunning,
+	domain.RunWaitingHuman,
+	domain.RunCompleted,
+	domain.RunFailed,
+	domain.RunCancelled,
+}
+
+func (d *Dispatcher) refreshMetrics(ctx context.Context) {
+	if d.opts.Metrics == nil {
+		return
+	}
+	counts, err := d.store.CountRunsByStatus(ctx)
+	if err != nil {
+		log.Printf("dispatcher: count runs by status: %v", err)
+	} else {
+		for _, status := range runStatuses {
+			d.opts.Metrics.Runs.WithLabelValues(string(status)).Set(float64(counts[status]))
+		}
+	}
+	d.limitMu.Lock()
+	inflight := make([]int, 0, len(d.limits))
+	for _, limit := range d.limits {
+		inflight = append(inflight, limit.inflight)
+	}
+	d.limitMu.Unlock()
+	for _, count := range inflight {
+		d.opts.Metrics.TenantInflight.Observe(float64(count))
 	}
 }
 
@@ -201,6 +236,10 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 		}
 		started := time.Now()
 		view := buildView(steps, d.opts)
+		if d.opts.Metrics != nil {
+			d.opts.Metrics.ContextTokens.Observe(float64(view.Tokens))
+			d.opts.Metrics.ContextDroppedSteps.Add(float64(view.DroppedSteps))
+		}
 		req := buildDecision(agent, run, stepIndex, attempt, view)
 		act, err := d.client.decide(ctx, agent, req)
 		if err != nil {
@@ -317,6 +356,9 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 
 			var fallbackFrom *string
 			if modelResult.FallbackFrom != "" {
+				if d.opts.Metrics != nil {
+					d.opts.Metrics.ModelFallbacks.Inc()
+				}
 				value := modelResult.FallbackFrom
 				fallbackFrom = &value
 			}
@@ -564,6 +606,9 @@ type llmCallResult struct {
 }
 
 func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) bool {
+	if d.opts.Metrics != nil {
+		d.opts.Metrics.StepRetries.Inc()
+	}
 	next := time.Now().Add(backoff(attempt))
 	if err := d.store.RescheduleStep(ctx, runID, attempt, next); err != nil {
 		log.Printf("runtime: reschedule run %s: %v", runID, err)
