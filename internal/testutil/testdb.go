@@ -35,6 +35,8 @@ func Pool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+const testLockKey int64 = 0x74657374
+
 func New(t *testing.T) *Env {
 	t.Helper()
 	url := URL(t)
@@ -43,6 +45,18 @@ func New(t *testing.T) *Env {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	ctx := context.Background()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire lock connection: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `select pg_advisory_lock($1)`, testLockKey); err != nil {
+		t.Fatalf("acquire test lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.Exec(context.Background(), `select pg_advisory_unlock($1)`, testLockKey)
+		conn.Release()
+	})
 	if err := migrate.Run(context.Background(), pool); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

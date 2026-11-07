@@ -6,18 +6,20 @@ import (
 )
 
 type Tenant struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
+	ID           string
+	Name         string
+	APIKeyHash   string
+	APIKeyPrefix string
+	CreatedAt    time.Time
 }
 
 type Agent struct {
-	ID        string
-	TenantID  string
-	Name      string
-	PolicyURL string
-	SecretEnv string
-	CreatedAt time.Time
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	Name      string    `json:"name"`
+	PolicyURL string    `json:"policy_url"`
+	SecretEnv string    `json:"secret_env"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type RunStatus string
@@ -52,22 +54,22 @@ const (
 )
 
 type Run struct {
-	ID             string
-	TenantID       string
-	AgentID        string
-	Status         RunStatus
-	Input          json.RawMessage
-	Output         json.RawMessage
-	Attempt        int
-	NextAttemptAt  *time.Time
-	PendingStep    json.RawMessage
-	HumanPrompt    string
-	Deadline       *time.Time
-	TerminalReason *TerminalReason
-	EvalID         *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	EndedAt        *time.Time
+	ID             string          `json:"id"`
+	TenantID       string          `json:"tenant_id"`
+	AgentID        string          `json:"agent_id"`
+	Status         RunStatus       `json:"status"`
+	Input          json.RawMessage `json:"input"`
+	Output         json.RawMessage `json:"output"`
+	Attempt        int             `json:"attempt"`
+	NextAttemptAt  *time.Time      `json:"next_attempt_at"`
+	PendingStep    json.RawMessage `json:"pending_step"`
+	HumanPrompt    string          `json:"human_prompt"`
+	Deadline       *time.Time      `json:"deadline"`
+	TerminalReason *TerminalReason `json:"terminal_reason"`
+	EvalID         *string         `json:"eval_id"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	EndedAt        *time.Time      `json:"ended_at"`
 }
 
 type Checkpoint struct {

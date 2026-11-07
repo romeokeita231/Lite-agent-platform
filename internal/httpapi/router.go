@@ -1,13 +1,30 @@
 package httpapi
 
-import "net/http"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
+	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
+	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
+)
 
 type Readiness interface {
 	Ready() bool
 }
 
-func NewMux(ready Readiness) *http.ServeMux {
+type API struct {
+	store domain.Store
+}
+
+func NewMux(ready Readiness, store domain.Store) *http.ServeMux {
 	mux := http.NewServeMux()
+	api := &API{store: store}
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
@@ -20,5 +37,156 @@ func NewMux(ready Readiness) *http.ServeMux {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
+
+	mux.Handle("POST /v1/agents", api.authenticated(http.HandlerFunc(api.createAgent)))
+	mux.Handle("GET /v1/agents", api.authenticated(http.HandlerFunc(api.listAgents)))
+	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
+	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	return mux
+}
+
+func (a *API) authenticated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+			return
+		}
+		sum := sha256.Sum256([]byte(key))
+		tenant, err := a.store.LookupTenantByAPIKey(r.Context(), hex.EncodeToString(sum[:]))
+		if errors.Is(err, domain.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "unknown API key")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "tenant lookup failed")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(repository.WithTenant(r.Context(), tenant.ID)))
+	})
+}
+
+type createAgentRequest struct {
+	Name      string `json:"name"`
+	PolicyURL string `json:"policy_url"`
+	SecretEnv string `json:"secret_env"`
+}
+
+func (a *API) createAgent(w http.ResponseWriter, r *http.Request) {
+	var req createAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	if req.Name == "" || req.PolicyURL == "" || req.SecretEnv == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "name, policy_url and secret_env are required")
+		return
+	}
+	tenantID, err := repository.TenantOf(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
+		return
+	}
+	agent, err := a.store.CreateAgent(r.Context(), domain.Agent{
+		ID:        ids.New(),
+		TenantID:  tenantID,
+		Name:      req.Name,
+		PolicyURL: req.PolicyURL,
+		SecretEnv: req.SecretEnv,
+	})
+	if errors.Is(err, domain.ErrConflict) {
+		writeError(w, http.StatusConflict, "conflict", "agent name already exists")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "create agent failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, agent)
+}
+
+func (a *API) listAgents(w http.ResponseWriter, r *http.Request) {
+	agents, err := a.store.ListAgents(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "list agents failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, agents)
+}
+
+type createRunRequest struct {
+	AgentID string          `json:"agent_id"`
+	Input   json.RawMessage `json:"input"`
+}
+
+func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
+	var req createRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	if req.AgentID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "agent_id is required")
+		return
+	}
+	if len(req.Input) == 0 {
+		req.Input = json.RawMessage("{}")
+	}
+	tenantID, err := repository.TenantOf(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
+		return
+	}
+	run, err := a.store.CreateRun(r.Context(), domain.Run{
+		ID:       ids.New(),
+		TenantID: tenantID,
+		AgentID:  req.AgentID,
+		Status:   domain.RunQueued,
+		Input:    req.Input,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "create run failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, run)
+}
+
+func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
+	run, err := a.store.GetRun(r.Context(), r.PathValue("id"))
+	if errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "get run failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func bearerToken(header string) (string, bool) {
+	const scheme = "Bearer "
+	if !strings.HasPrefix(header, scheme) {
+		return "", false
+	}
+	key := strings.TrimSpace(strings.TrimPrefix(header, scheme))
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+type errorBody struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, errorBody{Error: code, Message: message})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }

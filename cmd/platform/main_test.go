@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +22,42 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
 )
+
+func TestKeygenPrintsPlaintextHashAndPrefixOnce(t *testing.T) {
+	var buf bytes.Buffer
+	if err := keygen(&buf); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) != 1 {
+		t.Fatalf("keygen output is not one line: %q", buf.String())
+	}
+	var out struct {
+		APIKey       string `json:"api_key"`
+		APIKeyHash   string `json:"api_key_hash"`
+		APIKeyPrefix string `json:"api_key_prefix"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("decode keygen output: %v", err)
+	}
+	if out.APIKey == "" || len(out.APIKeyPrefix) != 8 {
+		t.Fatalf("keygen output = %+v", out)
+	}
+	sum := sha256.Sum256([]byte(out.APIKey))
+	if want := hex.EncodeToString(sum[:]); out.APIKeyHash != want {
+		t.Fatalf("api_key_hash = %q, want %q", out.APIKeyHash, want)
+	}
+	if out.APIKeyPrefix != out.APIKey[:8] {
+		t.Fatalf("api_key_prefix = %q, want %q", out.APIKeyPrefix, out.APIKey[:8])
+	}
+
+	var second bytes.Buffer
+	if err := keygen(&second); err != nil {
+		t.Fatalf("second keygen: %v", err)
+	}
+	if second.String() == buf.String() {
+		t.Fatalf("keygen repeated the same key")
+	}
+}
 
 func TestReadinessFlipsWithDatabaseRecovery(t *testing.T) {
 	dbURL := testutil.URL(t)
@@ -46,7 +87,7 @@ func TestReadinessFlipsWithDatabaseRecovery(t *testing.T) {
 		t.Fatal("readiness is true while the database is unreachable")
 	}
 
-	srv := httptest.NewServer(httpapi.NewMux(ready))
+	srv := httptest.NewServer(httpapi.NewMux(ready, nil))
 	defer srv.Close()
 
 	if status := getStatus(t, srv.URL+"/healthz"); status != http.StatusOK {
