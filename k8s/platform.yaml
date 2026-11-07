@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform
+  labels:
+    app: platform
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      app: platform
+  template:
+    metadata:
+      labels:
+        app: platform
+    spec:
+      # > STEP_TIMEOUT (10s) + 5s drain + HTTP shutdown (10s).
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: platform
+          # docker build --target platform -t lite-agent-platform:local .
+          image: lite-agent-platform:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: platform-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: DATABASE_URL
+            - name: POLICY_SECRET_DEMO
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POLICY_SECRET_DEMO
+            - name: POLICY_SECRET_TOOL_SLOW
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POLICY_SECRET_TOOL_SLOW
+            - name: POLICY_SECRET_HUMAN
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POLICY_SECRET_HUMAN
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: MODEL_API_KEY
+                  optional: true
+            - name: DEMO_API_KEY_A
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: DEMO_API_KEY_A
+                  optional: true
+            - name: DEMO_API_KEY_B
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: DEMO_API_KEY_B
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform
+  labels:
+    app: platform
+spec:
+  selector:
+    app: platform
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
