@@ -101,6 +101,8 @@ func run() error {
 		PollInterval:      cfg.PollInterval,
 		TenantConcurrency: cfg.TenantConcurrency,
 		TenantRate:        cfg.TenantRate,
+		ContextRecent:     cfg.ContextRecent,
+		ContextMaxKeep:    cfg.ContextMaxKeep,
 	})
 	go dispatcher.Run(ctx)
 

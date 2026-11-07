@@ -204,9 +204,26 @@ func (a *API) submitHumanInput(w http.ResponseWriter, r *http.Request) {
 	if len(input) == 0 {
 		input = json.RawMessage("null")
 	}
+	var pending struct {
+		Keep                []int `json:"keep"`
+		ContextTokens       int   `json:"context_tokens"`
+		ContextDroppedSteps int   `json:"context_dropped_steps"`
+	}
+	if len(run.PendingStep) > 0 {
+		_ = json.Unmarshal(run.PendingStep, &pending)
+	}
 	result, err := json.Marshal(struct {
 		Input json.RawMessage `json:"input"`
-	}{Input: input})
+		Keep  []int           `json:"keep,omitempty"`
+	}{Input: input, Keep: pending.Keep})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "encode human input failed")
+		return
+	}
+	attributes, err := json.Marshal(map[string]any{
+		"context_tokens":        pending.ContextTokens,
+		"context_dropped_steps": pending.ContextDroppedSteps,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "encode human input failed")
 		return
@@ -230,7 +247,7 @@ func (a *API) submitHumanInput(w http.ResponseWriter, r *http.Request) {
 		Name:       "step.human_review",
 		StartedAt:  now,
 		EndedAt:    now,
-		Attributes: json.RawMessage(`{}`),
+		Attributes: attributes,
 	}
 	updated, err := a.store.SubmitHumanInput(r.Context(), checkpoint, span)
 	if errors.Is(err, domain.ErrConflict) {
