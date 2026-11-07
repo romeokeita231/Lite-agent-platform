@@ -496,6 +496,47 @@ func (s *Store) GetSteps(ctx context.Context, runID string) ([]domain.Checkpoint
 	return steps, nil
 }
 
+func (s *Store) ListSpans(ctx context.Context, runID string) ([]domain.Span, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`select exists(select 1 from runs where id::text = $1 and tenant_id = $2)`,
+		runID, tenantID,
+	).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, domain.ErrNotFound
+	}
+	rows, err := s.pool.Query(ctx,
+		`select id::text, tenant_id, run_id::text, step_index, attempt, name, started_at, ended_at,
+		        coalesce(attributes, '{}'::jsonb), error
+		 from spans where tenant_id = $1 and run_id::text = $2
+		 order by started_at asc, id asc`,
+		tenantID, runID)
+	if err != nil {
+		return nil, err
+	}
+	spans, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Span, error) {
+		var span domain.Span
+		var spanRunID *string
+		err := row.Scan(&span.ID, &span.TenantID, &spanRunID, &span.StepIndex, &span.Attempt, &span.Name,
+			&span.StartedAt, &span.EndedAt, &span.Attributes, &span.Error)
+		span.RunID = spanRunID
+		return span, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if spans == nil {
+		spans = []domain.Span{}
+	}
+	return spans, nil
+}
+
 func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span, output json.RawMessage) error {
 	tenantID, err := TenantOf(ctx)
 	if err != nil {

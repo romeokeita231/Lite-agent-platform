@@ -54,6 +54,7 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, drain
 	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
+	mux.Handle("GET /v1/runs/{id}/trace", api.authenticated(http.HandlerFunc(api.getRunTrace)))
 	mux.Handle("POST /v1/runs/{id}/human-input", api.authenticated(http.HandlerFunc(api.submitHumanInput)))
 	mux.Handle("POST /v1/runs/{id}/cancel", api.authenticated(http.HandlerFunc(api.cancelRun)))
 	mux.Handle("POST /v1/tools", api.authenticated(http.HandlerFunc(api.createTool)))
