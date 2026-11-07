@@ -109,6 +109,19 @@ type ModelCallLog struct {
 	Status         string
 }
 
+const (
+	UsageGroupByModel = "model"
+	UsageGroupByRun   = "run"
+)
+
+type UsageGroup struct {
+	Model        string
+	RunID        *string
+	Calls        int
+	InputTokens  int
+	OutputTokens int
+}
+
 type ModelRoute struct {
 	TenantID  string
 	Label     string
