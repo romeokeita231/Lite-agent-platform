@@ -30,6 +30,8 @@ import (
 const (
 	dbCheckTimeout      = 5 * time.Second
 	maintenanceInterval = time.Second
+	shutdownGrace       = 5 * time.Second
+	httpShutdownTimeout = 10 * time.Second
 )
 
 func main() {
@@ -69,8 +71,8 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -100,20 +102,37 @@ func run() error {
 	})
 	go dispatcher.Run(ctx)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready)}
 
+	serveErr := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		ready.SetReady(false)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown: %v", err)
-		}
+		serveErr <- server.ListenAndServe()
 	}()
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	select {
+	case <-signals:
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
+
+	ready.SetDraining(true)
+	ready.SetReady(false)
+	dispatcher.Stop(cfg.StepTimeout + shutdownGrace)
+	cancel()
+	if err := store.ResetRunningRuns(context.Background()); err != nil {
+		log.Printf("shutdown: reset running runs: %v", err)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
 	}
 	return nil
 }
