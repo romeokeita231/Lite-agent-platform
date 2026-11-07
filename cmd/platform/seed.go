@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/config"
+	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/ids"
 	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
 )
@@ -106,12 +105,11 @@ func seed(ctx context.Context, pool *pgxpool.Pool, policyURL, keyA, keyB string,
 }
 
 func seedTenant(ctx context.Context, pool *pgxpool.Pool, id, key string) error {
-	sum := sha256.Sum256([]byte(key))
 	_, err := pool.Exec(ctx,
 		`insert into tenants (id, name, api_key_hash, api_key_prefix) values ($1, $2, $3, $4)
 		 on conflict (id) do update set name = excluded.name, api_key_hash = excluded.api_key_hash,
 		     api_key_prefix = excluded.api_key_prefix`,
-		id, id, hex.EncodeToString(sum[:]), keyPrefix(key))
+		id, id, domain.HashAPIKey(key), domain.APIKeyPrefix(key))
 	return err
 }
 
@@ -138,11 +136,36 @@ func seedAgents(ctx context.Context, pool *pgxpool.Pool, tenantID, policyURL str
 }
 
 func seedModelsAndTools(ctx context.Context, pool *pgxpool.Pool, tenantID, policyURL string) error {
-	if _, err := pool.Exec(ctx,
-		`insert into model_routes (tenant_id, label, chain) values ($1, 'default', '["demo-model"]')
-		 on conflict (tenant_id, label) do update set chain = excluded.chain`,
-		tenantID); err != nil {
-		return err
+	model := os.Getenv("DEMO_MODEL")
+	if model == "" {
+		model = "demo-model"
+	}
+	cheap := os.Getenv("DEMO_MODEL_CHEAP")
+	if cheap == "" {
+		cheap = model
+	}
+	fast := os.Getenv("DEMO_MODEL_FAST")
+	if fast == "" {
+		fast = model
+	}
+	for _, route := range []struct {
+		label string
+		model string
+	}{
+		{label: "default", model: model},
+		{label: "cheap", model: cheap},
+		{label: "fast", model: fast},
+	} {
+		chain, err := json.Marshal([]string{route.model})
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx,
+			`insert into model_routes (tenant_id, label, chain) values ($1, $2, $3)
+			 on conflict (tenant_id, label) do update set chain = excluded.chain`,
+			tenantID, route.label, string(chain)); err != nil {
+			return err
+		}
 	}
 	base := strings.TrimSuffix(policyURL, "/")
 	for _, tool := range []struct {
@@ -162,11 +185,4 @@ func seedModelsAndTools(ctx context.Context, pool *pgxpool.Pool, tenantID, polic
 		}
 	}
 	return nil
-}
-
-func keyPrefix(key string) string {
-	if len(key) < 8 {
-		return key
-	}
-	return key[:8]
 }

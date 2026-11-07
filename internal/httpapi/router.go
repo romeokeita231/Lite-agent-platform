@@ -1,8 +1,6 @@
 package httpapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -78,8 +76,7 @@ func (a *API) authenticated(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}
-		sum := sha256.Sum256([]byte(key))
-		tenant, err := a.store.LookupTenantByAPIKey(r.Context(), hex.EncodeToString(sum[:]))
+		tenant, err := a.store.LookupTenantByAPIKey(r.Context(), domain.HashAPIKey(key))
 		if errors.Is(err, domain.ErrNotFound) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "unknown API key")
 			return
@@ -165,6 +162,13 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 	tenantID, err := domain.TenantOf(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
+		return
+	}
+	if _, err := a.store.GetAgent(r.Context(), req.AgentID); errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "agent not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "get agent failed")
 		return
 	}
 	run, err := a.store.CreateRun(r.Context(), domain.Run{

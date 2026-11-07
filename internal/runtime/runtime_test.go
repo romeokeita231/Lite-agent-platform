@@ -176,7 +176,7 @@ func newEnvWithRuntimeOptions(t *testing.T, base *testutil.Env, store *repositor
 	tools := toolgw.New(store, options.StepTimeout)
 	metrics := observability.NewMetrics()
 	tools.SetMetrics(metrics)
-	if client, ok := gateway.(interface{ SetMetrics(*observability.Metrics) }); ok {
+	if client, ok := gateway.(interface{ SetMetrics(observability.Recorder) }); ok {
 		client.SetMetrics(metrics)
 	}
 	options.Metrics = metrics

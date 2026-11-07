@@ -314,10 +314,10 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (domain.Run, error
 		return domain.Run{}, err
 	}
 
-	switch run.Status {
-	case domain.RunCompleted, domain.RunFailed, domain.RunCancelled:
+	switch {
+	case run.Status.Terminal():
 		return domain.Run{}, domain.ErrConflict
-	case domain.RunWaitingHuman:
+	case run.Status == domain.RunWaitingHuman:
 		tag, err := tx.Exec(ctx,
 			`update runs set status = 'cancelled', terminal_reason = $3, cancel_requested = true,
 			        pending_step = null, human_prompt = '', deadline = null,
@@ -379,12 +379,27 @@ func (s *Store) MarkCancelled(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`update runs set status = 'cancelled', terminal_reason = $2, cancel_requested = true,
 		        ended_at = now(), updated_at = now()
 		 where id::text = $1 and tenant_id = $3 and status in ('queued', 'running')`,
 		id, string(domain.ReasonCancelledByTenant), tenantID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := s.pool.QueryRow(ctx,
+			`select exists(select 1 from runs where id::text = $1 and tenant_id = $2)`,
+			id, tenantID,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return domain.ErrNotFound
+		}
+	}
+	return nil
 }
 
 func (s *Store) EnterHumanReview(ctx context.Context, id string, attempt int, pendingStep json.RawMessage, prompt string, deadline time.Time) error {
@@ -414,10 +429,6 @@ func (s *Store) SubmitHumanInput(ctx context.Context, checkpoint domain.Checkpoi
 	if checkpoint.TenantID != tenantID || span.TenantID != tenantID {
 		return domain.Run{}, domain.ErrNotFound
 	}
-	attributes := span.Attributes
-	if len(attributes) == 0 {
-		attributes = json.RawMessage("{}")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.Run{}, err
@@ -445,18 +456,10 @@ func (s *Store) SubmitHumanInput(ctx context.Context, checkpoint domain.Checkpoi
 	if domain.RunStatus(status) != domain.RunWaitingHuman || pendingIndex != checkpoint.StepIndex {
 		return domain.Run{}, domain.ErrConflict
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
-		 values ($1::uuid, $2, $3, $4, $5, $6)`,
-		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
-	); err != nil {
+	if err := insertCheckpoint(ctx, tx, checkpoint); err != nil {
 		return domain.Run{}, uniqueToConflict(err)
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
-		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
-	); err != nil {
+	if err := insertSpans(ctx, tx, tenantID, &checkpoint.RunID, []domain.Span{span}); err != nil {
 		return domain.Run{}, err
 	}
 	tag, err := tx.Exec(ctx,
@@ -582,30 +585,17 @@ func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoin
 	if len(output) == 0 {
 		output = json.RawMessage("{}")
 	}
-	attributes := span.Attributes
-	if len(attributes) == 0 {
-		attributes = json.RawMessage("{}")
-	}
 	runID := checkpoint.RunID
-	spanRunID := runID
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
-		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
-		 values ($1::uuid, $2, $3, $4, $5, $6)`,
-		runID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
-	); err != nil {
+	if err := insertCheckpoint(ctx, tx, checkpoint); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
-		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-		span.ID, tenantID, spanRunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
-	); err != nil {
+	if err := insertSpans(ctx, tx, tenantID, &runID, []domain.Span{span}); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx,
@@ -636,33 +626,19 @@ func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Check
 		}
 	}
 	runID := checkpoint.RunID
-	chain, err := modelChainJSON(log.Chain)
-	if err != nil {
-		return err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
-		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
-		 values ($1::uuid, $2, $3, $4, $5, $6)`,
-		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
-	); err != nil {
+	if err := insertCheckpoint(ctx, tx, checkpoint); err != nil {
 		return err
 	}
 	if err := insertSpans(ctx, tx, tenantID, &runID, spans); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
-		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
-		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
-		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status,
-	); err != nil {
+	if err := insertModelCallLog(ctx, tx, log); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx,
@@ -691,10 +667,6 @@ func (s *Store) RecordModelCallAttempts(ctx context.Context, spans []domain.Span
 			return domain.ErrNotFound
 		}
 	}
-	chain, err := modelChainJSON(log.Chain)
-	if err != nil {
-		return err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -703,13 +675,7 @@ func (s *Store) RecordModelCallAttempts(ctx context.Context, spans []domain.Span
 	if err := insertSpans(ctx, tx, tenantID, log.RunID, spans); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
-		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
-		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
-		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status,
-	); err != nil {
+	if err := insertModelCallLog(ctx, tx, log); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -796,17 +762,7 @@ func (s *Store) RecordModelCallLog(ctx context.Context, log domain.ModelCallLog)
 	if log.TenantID != tenantID {
 		return domain.ErrNotFound
 	}
-	chain, err := modelChainJSON(log.Chain)
-	if err != nil {
-		return err
-	}
-	_, err = s.pool.Exec(ctx,
-		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
-		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
-		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
-		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status)
-	return err
+	return insertModelCallLog(ctx, s.pool, log)
 }
 
 func (s *Store) ModelUsage(ctx context.Context, groupBy string, from, to *time.Time) ([]domain.UsageGroup, error) {
@@ -958,10 +914,6 @@ func (s *Store) CompleteToolCallStep(ctx context.Context, checkpoint domain.Chec
 	if checkpoint.TenantID != tenantID || span.TenantID != tenantID || invocation.TenantID != tenantID {
 		return domain.ErrNotFound
 	}
-	attributes := span.Attributes
-	if len(attributes) == 0 {
-		attributes = json.RawMessage("{}")
-	}
 	args := invocation.Args
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
@@ -976,24 +928,18 @@ func (s *Store) CompleteToolCallStep(ctx context.Context, checkpoint domain.Chec
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
-		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
-		 values ($1::uuid, $2, $3, $4, $5, $6)`,
-		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
-	); err != nil {
+	if err := insertCheckpoint(ctx, tx, checkpoint); err != nil {
+		return err
+	}
+	if err := insertSpans(ctx, tx, tenantID, &checkpoint.RunID, []domain.Span{span}); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
-		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
-		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
-	); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`insert into tool_invocations (id, tenant_id, run_id, tool_name, version, args, result, status, created_at)
-		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9)`,
+		`insert into tool_invocations (id, tenant_id, run_id, tool_name, version, args, result, status, created_at,
+		        step_index, idempotency_key, latency_ms)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		invocation.ID, tenantID, checkpoint.RunID, invocation.ToolName, invocation.Version, args, result, invocation.Status, invocation.CreatedAt,
+		invocation.StepIndex, invocation.IdempotencyKey, invocation.LatencyMS,
 	); err != nil {
 		return err
 	}
@@ -1016,7 +962,8 @@ func (s *Store) ListToolInvocations(ctx context.Context, runID string) ([]domain
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`select id::text, tenant_id, run_id::text, tool_name, version, args, result, status, created_at
+		`select id::text, tenant_id, run_id::text, tool_name, version, args, result, status, created_at,
+		        step_index, idempotency_key, latency_ms
 		 from tool_invocations
 		 where tenant_id = $1 and run_id::text = $2
 		 order by created_at asc, id asc`,
@@ -1027,7 +974,8 @@ func (s *Store) ListToolInvocations(ctx context.Context, runID string) ([]domain
 	invocations, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.ToolInvocation, error) {
 		var invocation domain.ToolInvocation
 		err := row.Scan(&invocation.ID, &invocation.TenantID, &invocation.RunID, &invocation.ToolName,
-			&invocation.Version, &invocation.Args, &invocation.Result, &invocation.Status, &invocation.CreatedAt)
+			&invocation.Version, &invocation.Args, &invocation.Result, &invocation.Status, &invocation.CreatedAt,
+			&invocation.StepIndex, &invocation.IdempotencyKey, &invocation.LatencyMS)
 		return invocation, err
 	})
 	if err != nil {
@@ -1147,6 +1095,30 @@ func insertSpans(ctx context.Context, db spanInserter, tenantID string, runID *s
 		}
 	}
 	return nil
+}
+
+func insertCheckpoint(ctx context.Context, db spanInserter, checkpoint domain.Checkpoint) error {
+	_, err := db.Exec(ctx,
+		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
+		 values ($1::uuid, $2, $3, $4, $5, $6)`,
+		checkpoint.RunID, checkpoint.TenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
+	)
+	return err
+}
+
+func insertModelCallLog(ctx context.Context, db spanInserter, log domain.ModelCallLog) error {
+	chain, err := modelChainJSON(log.Chain)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx,
+		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
+		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
+		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		log.TenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
+		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status,
+	)
+	return err
 }
 
 func modelChainJSON(chain []string) ([]byte, error) {

@@ -24,7 +24,7 @@ type Options struct {
 	TenantRate        float64
 	ContextRecent     int
 	ContextMaxKeep    int
-	Metrics           *observability.Metrics
+	Metrics           observability.Recorder
 }
 
 type tenantLimit struct {
@@ -160,7 +160,7 @@ func (d *Dispatcher) refreshMetrics(ctx context.Context) {
 		log.Printf("dispatcher: count runs by status: %v", err)
 	} else {
 		for _, status := range runStatuses {
-			d.opts.Metrics.Runs.WithLabelValues(string(status)).Set(float64(counts[status]))
+			d.opts.Metrics.SetRunStatus(string(status), int(counts[status]))
 		}
 	}
 	d.limitMu.Lock()
@@ -170,7 +170,7 @@ func (d *Dispatcher) refreshMetrics(ctx context.Context) {
 	}
 	d.limitMu.Unlock()
 	for _, count := range inflight {
-		d.opts.Metrics.TenantInflight.Observe(float64(count))
+		d.opts.Metrics.ObserveTenantInflight(count)
 	}
 }
 
@@ -242,7 +242,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 	}
 	retry := func(attempt int) bool {
 		if d.opts.Metrics != nil {
-			d.opts.Metrics.StepRetries.Inc()
+			d.opts.Metrics.IncStepRetry()
 		}
 		next := time.Now().Add(backoff(attempt))
 		if err := d.store.RescheduleStep(ctx, run.ID, attempt, next); err != nil {
@@ -256,6 +256,17 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 		}
 		return reacquire()
 	}
+	retryOrFail := func(runID string, attempt *int, reason domain.TerminalReason, cause error) bool {
+		*attempt++
+		if *attempt >= d.opts.MaxStepAttempts {
+			if cause != nil {
+				log.Printf("runtime: run %s: %v", runID, cause)
+			}
+			d.fail(ctx, runID, reason)
+			return false
+		}
+		return retry(*attempt)
+	}
 	for {
 		if ctx.Err() != nil || d.stopped.Load() {
 			return
@@ -266,8 +277,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 		started := time.Now()
 		view := buildView(steps, d.opts)
 		if d.opts.Metrics != nil {
-			d.opts.Metrics.ContextTokens.Observe(float64(view.Tokens))
-			d.opts.Metrics.ContextDroppedSteps.Add(float64(view.DroppedSteps))
+			d.opts.Metrics.ObserveContext(view.Tokens, view.DroppedSteps)
 		}
 		req := buildDecision(agent, run, stepIndex, attempt, view)
 		act, err := d.client.decide(ctx, agent, req)
@@ -280,12 +290,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				d.fail(ctx, run.ID, failure.reason)
 				return
 			}
-			attempt++
-			if attempt >= d.opts.MaxStepAttempts {
-				d.fail(ctx, run.ID, failure.reason)
-				return
-			}
-			if !retry(attempt) {
+			if !retryOrFail(run.ID, &attempt, failure.reason, nil) {
 				return
 			}
 			continue
@@ -326,13 +331,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				if ctx.Err() != nil {
 					return
 				}
-				attempt++
-				if attempt >= d.opts.MaxStepAttempts {
-					log.Printf("runtime: complete run %s: %v", run.ID, err)
-					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
-					return
-				}
-				if !retry(attempt) {
+				if !retryOrFail(run.ID, &attempt, domain.ReasonMaxRetries, err) {
 					return
 				}
 				continue
@@ -372,16 +371,11 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 						log.Printf("runtime: record model call attempts for run %s: %v", run.ID, err)
 					}
 				}
-				attempt++
-				if attempt >= d.opts.MaxStepAttempts {
-					reason := domain.ReasonMaxRetries
-					if errors.Is(callErr, context.DeadlineExceeded) {
-						reason = domain.ReasonStepTimeout
-					}
-					d.fail(ctx, run.ID, reason)
-					return
+				reason := domain.ReasonMaxRetries
+				if errors.Is(callErr, context.DeadlineExceeded) {
+					reason = domain.ReasonStepTimeout
 				}
-				if !retry(attempt) {
+				if !retryOrFail(run.ID, &attempt, reason, nil) {
 					return
 				}
 				continue
@@ -421,13 +415,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				if ctx.Err() != nil {
 					return
 				}
-				attempt++
-				if attempt >= d.opts.MaxStepAttempts {
-					log.Printf("runtime: complete llm_call run %s: %v", run.ID, err)
-					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
-					return
-				}
-				if !retry(attempt) {
+				if !retryOrFail(run.ID, &attempt, domain.ReasonMaxRetries, err) {
 					return
 				}
 				continue
@@ -458,22 +446,18 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			}
 			runID := run.ID
 			toolStart := time.Now()
-			toolResult, callErr := d.tools.Invoke(ctx, tool, act.Args, fmt.Sprintf("%s:%d", run.ID, stepIndex))
+			idempotencyKey := fmt.Sprintf("%s:%d", run.ID, stepIndex)
+			toolResult, callErr := d.tools.Invoke(ctx, tool, act.Args, idempotencyKey)
 			finished := time.Now()
 			if callErr != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				attempt++
-				if attempt >= d.opts.MaxStepAttempts {
-					reason := domain.ReasonMaxRetries
-					if errors.Is(callErr, context.DeadlineExceeded) {
-						reason = domain.ReasonStepTimeout
-					}
-					d.fail(ctx, run.ID, reason)
-					return
+				reason := domain.ReasonMaxRetries
+				if errors.Is(callErr, context.DeadlineExceeded) {
+					reason = domain.ReasonStepTimeout
 				}
-				if !retry(attempt) {
+				if !retryOrFail(run.ID, &attempt, reason, nil) {
 					return
 				}
 				continue
@@ -517,27 +501,24 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				Attributes: attributes,
 			}
 			invocation := domain.ToolInvocation{
-				ID:        ids.New(),
-				TenantID:  run.TenantID,
-				RunID:     run.ID,
-				ToolName:  tool.ToolName,
-				Version:   tool.Version,
-				Args:      act.Args,
-				Result:    toolResult,
-				Status:    "ok",
-				CreatedAt: finished,
+				ID:             ids.New(),
+				TenantID:       run.TenantID,
+				RunID:          run.ID,
+				ToolName:       tool.ToolName,
+				Version:        tool.Version,
+				Args:           act.Args,
+				Result:         toolResult,
+				Status:         domain.ToolStatusOK,
+				CreatedAt:      finished,
+				StepIndex:      stepIndex,
+				IdempotencyKey: idempotencyKey,
+				LatencyMS:      finished.Sub(toolStart).Milliseconds(),
 			}
 			if err := d.store.CompleteToolCallStep(ctx, checkpoint, span, invocation); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				attempt++
-				if attempt >= d.opts.MaxStepAttempts {
-					log.Printf("runtime: complete tool_call run %s: %v", run.ID, err)
-					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
-					return
-				}
-				if !retry(attempt) {
+				if !retryOrFail(run.ID, &attempt, domain.ReasonMaxRetries, err) {
 					return
 				}
 				continue

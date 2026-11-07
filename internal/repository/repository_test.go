@@ -357,8 +357,8 @@ func TestDispatcherMutationsAreTenantScoped(t *testing.T) {
 		t.Fatalf("cross-tenant fail changed run a: %+v", gotA)
 	}
 
-	if err := store.MarkCancelled(ctxB, runA.ID); err != nil {
-		t.Fatalf("cross-tenant mark cancelled: %v", err)
+	if err := store.MarkCancelled(ctxB, runA.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant mark cancelled error = %v, want ErrNotFound", err)
 	}
 	gotA, err = store.GetRun(ctxA, runA.ID)
 	if err != nil {

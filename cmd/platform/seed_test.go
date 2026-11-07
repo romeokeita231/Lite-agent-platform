@@ -85,7 +85,7 @@ func TestSeedIsIdempotentAndStoresHashedKeys(t *testing.T) {
 	).Scan(&tenants, &agents, &tools, &routes); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
-	if tenants != 2 || agents != 6 || tools != 4 || routes != 2 {
+	if tenants != 2 || agents != 6 || tools != 4 || routes != 6 {
 		t.Fatalf("after first seed tenants=%d agents=%d tools=%d routes=%d", tenants, agents, tools, routes)
 	}
 
@@ -105,7 +105,7 @@ func TestSeedIsIdempotentAndStoresHashedKeys(t *testing.T) {
 	).Scan(&tenants, &agents, &tools, &routes); err != nil {
 		t.Fatalf("count rows after second seed: %v", err)
 	}
-	if tenants != 2 || agents != 6 || tools != 4 || routes != 2 {
+	if tenants != 2 || agents != 6 || tools != 4 || routes != 6 {
 		t.Fatalf("after second seed tenants=%d agents=%d tools=%d routes=%d", tenants, agents, tools, routes)
 	}
 

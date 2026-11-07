@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/config"
+	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
 	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
 	"github.com/romeokeita231/Lite-agent-platform/internal/modelgw"
@@ -66,15 +66,14 @@ func keygen(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256([]byte(apiKey))
 	payload := struct {
 		APIKey       string `json:"api_key"`
 		APIKeyHash   string `json:"api_key_hash"`
 		APIKeyPrefix string `json:"api_key_prefix"`
 	}{
 		APIKey:       apiKey,
-		APIKeyHash:   hex.EncodeToString(sum[:]),
-		APIKeyPrefix: apiKey[:8],
+		APIKeyHash:   domain.HashAPIKey(apiKey),
+		APIKeyPrefix: domain.APIKeyPrefix(apiKey),
 	}
 	return json.NewEncoder(w).Encode(payload)
 }
@@ -98,7 +97,7 @@ func run() error {
 
 	ready := observability.NewReadiness()
 	dispatcherStarted := make(chan struct{})
-	maint := &dbMaintenance{pool: pool, ready: ready, recover: true, started: dispatcherStarted}
+	maint := &dbMaintenance{pool: pool, ready: ready, recoverOnStart: true, started: dispatcherStarted}
 
 	metrics := observability.NewMetrics()
 	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
@@ -160,12 +159,12 @@ func run() error {
 }
 
 type dbMaintenance struct {
-	pool     *pgxpool.Pool
-	ready    *observability.Readiness
-	migrated bool
-	recover  bool
-	started  chan struct{}
-	startOne sync.Once
+	pool           *pgxpool.Pool
+	ready          *observability.Readiness
+	migrated       bool
+	recoverOnStart bool
+	started        chan struct{}
+	startOne       sync.Once
 }
 
 func (d *dbMaintenance) check(ctx context.Context) {
@@ -181,7 +180,7 @@ func (d *dbMaintenance) check(ctx context.Context) {
 			d.ready.SetReady(false)
 			return
 		}
-		if d.recover {
+		if d.recoverOnStart {
 			if err := repository.New(d.pool).ResetRunningRuns(checkCtx); err != nil {
 				d.ready.SetReady(false)
 				return
