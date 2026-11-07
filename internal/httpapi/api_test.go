@@ -9,12 +9,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
+	"github.com/romeokeita231/Lite-agent-platform/internal/toolgw"
 )
 
 type alwaysReady struct{}
@@ -49,7 +52,7 @@ func newAPI(t *testing.T) *apiEnv {
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store))
+	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second)))
 	t.Cleanup(env2.srv.Close)
 	return env2
 }
@@ -287,6 +290,233 @@ func TestRunSubmissionAndQueryAreTenantScoped(t *testing.T) {
 
 func rawNull(raw json.RawMessage) bool {
 	return len(raw) == 0 || string(raw) == "null"
+}
+
+type httpToolCall struct {
+	Args json.RawMessage
+	Key  string
+}
+
+type httpToolServer struct {
+	srv   *httptest.Server
+	mu    sync.Mutex
+	calls []httpToolCall
+}
+
+func newHTTPToolServer(t *testing.T) *httpToolServer {
+	t.Helper()
+	f := &httpToolServer{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.calls = append(f.calls, httpToolCall{Args: json.RawMessage(body), Key: r.Header.Get("Idempotency-Key")})
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *httpToolServer) received() []httpToolCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]httpToolCall, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+func registerTool(t *testing.T, api *apiEnv, tenant, name, version, endpoint string, isDefault bool) domain.Tool {
+	t.Helper()
+	status, raw := api.do(t, http.MethodPost, "/v1/tools", tenant, map[string]any{
+		"tool_name": name,
+		"version":   version,
+		"schema": map[string]any{
+			"type":     "object",
+			"required": []string{"order_id"},
+			"properties": map[string]any{
+				"order_id": map[string]string{"type": "string"},
+			},
+		},
+		"endpoint":   endpoint,
+		"is_default": isDefault,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("register tool status = %d body=%s", status, raw)
+	}
+	var tool domain.Tool
+	if err := json.Unmarshal(raw, &tool); err != nil {
+		t.Fatalf("decode tool: %v", err)
+	}
+	return tool
+}
+
+func TestToolRegistrationListAndInvocationAreTenantScoped(t *testing.T) {
+	api := newAPI(t)
+	toolServer := newHTTPToolServer(t)
+	tool := registerTool(t, api, "tenant-a", "lookup", "1", toolServer.srv.URL, true)
+	if tool.ToolName != "lookup" || tool.Version != "1" || !tool.IsDefault || tool.Endpoint != toolServer.srv.URL {
+		t.Fatalf("registered tool = %+v", tool)
+	}
+
+	status, raw := api.do(t, http.MethodGet, "/v1/tools", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list tools a status = %d body=%s", status, raw)
+	}
+	var toolsA []domain.Tool
+	if err := json.Unmarshal(raw, &toolsA); err != nil {
+		t.Fatalf("decode tools a: %v", err)
+	}
+	if len(toolsA) != 1 || toolsA[0].ToolName != "lookup" || toolsA[0].Version != "1" {
+		t.Fatalf("tools a = %+v", toolsA)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/tools", "tenant-b", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list tools b status = %d body=%s", status, raw)
+	}
+	var toolsB []domain.Tool
+	if err := json.Unmarshal(raw, &toolsB); err != nil {
+		t.Fatalf("decode tools b: %v", err)
+	}
+	if len(toolsB) != 0 {
+		t.Fatalf("tenant b sees tools = %+v", toolsB)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools/lookup/invoke", "tenant-a", map[string]any{
+		"args": map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("invoke status = %d body=%s", status, raw)
+	}
+	var invoked struct {
+		Tool    string          `json:"tool"`
+		Version string          `json:"version"`
+		Result  json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &invoked); err != nil {
+		t.Fatalf("decode invoke response: %v", err)
+	}
+	if invoked.Tool != "lookup" || invoked.Version != "1" || string(invoked.Result) != `{"ok":true}` {
+		t.Fatalf("invoke response = %+v", invoked)
+	}
+	calls := toolServer.received()
+	if len(calls) != 1 {
+		t.Fatalf("tool endpoint calls = %d, want 1", len(calls))
+	}
+	if string(calls[0].Args) != `{"order_id":"A1"}` {
+		t.Fatalf("tool endpoint args = %s", calls[0].Args)
+	}
+	if calls[0].Key != "" {
+		t.Fatalf("invoke sent idempotency key %q", calls[0].Key)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools/lookup/invoke", "tenant-a", map[string]any{
+		"args": map[string]string{"wrong": "x"},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("schema violation status = %d body=%s", status, raw)
+	}
+	if body := decodeError(t, raw); body.Error != "bad_request" {
+		t.Fatalf("schema violation body = %+v", body)
+	}
+	if calls := toolServer.received(); len(calls) != 1 {
+		t.Fatalf("schema violation called endpoint: %d calls", len(calls))
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools/lookup/invoke", "tenant-a", map[string]any{
+		"version": "9",
+		"args":    map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("unknown version status = %d body=%s", status, raw)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools/lookup/invoke", "tenant-b", map[string]any{
+		"args": map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("cross-tenant invoke status = %d body=%s", status, raw)
+	}
+	if body := decodeError(t, raw); body.Error != "bad_request" {
+		t.Fatalf("cross-tenant invoke body = %+v", body)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools", "tenant-a", map[string]any{
+		"tool_name": "lookup",
+		"version":   "1",
+		"schema":    map[string]any{"type": "object"},
+		"endpoint":  toolServer.srv.URL,
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("duplicate tool status = %d body=%s", status, raw)
+	}
+	if body := decodeError(t, raw); body.Error != "conflict" {
+		t.Fatalf("duplicate tool body = %+v", body)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools", "tenant-a", map[string]any{
+		"tool_name": "lookup",
+		"schema":    map[string]any{"type": "object"},
+		"endpoint":  toolServer.srv.URL,
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("tool without version status = %d body=%s", status, raw)
+	}
+}
+
+func TestToolDefaultVersionIsExclusiveAndUsedByInvoke(t *testing.T) {
+	api := newAPI(t)
+	v1Server := newHTTPToolServer(t)
+	v2Server := newHTTPToolServer(t)
+	registerTool(t, api, "tenant-a", "lookup", "1", v1Server.srv.URL, true)
+	registerTool(t, api, "tenant-a", "lookup", "2", v2Server.srv.URL, true)
+
+	status, raw := api.do(t, http.MethodGet, "/v1/tools", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list tools status = %d body=%s", status, raw)
+	}
+	var tools []domain.Tool
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		t.Fatalf("decode tools: %v", err)
+	}
+	if len(tools) != 2 || tools[0].Version != "1" || tools[0].IsDefault ||
+		tools[1].Version != "2" || !tools[1].IsDefault {
+		t.Fatalf("tools = %+v", tools)
+	}
+
+	status, raw = api.do(t, http.MethodPost, "/v1/tools/lookup/invoke", "tenant-a", map[string]any{
+		"args": map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("invoke status = %d body=%s", status, raw)
+	}
+	var invoked struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &invoked); err != nil {
+		t.Fatalf("decode invoke: %v", err)
+	}
+	if invoked.Version != "2" {
+		t.Fatalf("invoke version = %q, want 2", invoked.Version)
+	}
+	if calls := v1Server.received(); len(calls) != 0 {
+		t.Fatalf("v1 calls = %d, want 0", len(calls))
+	}
+	if calls := v2Server.received(); len(calls) != 1 {
+		t.Fatalf("v2 calls = %d, want 1", len(calls))
+	}
+
+	_, err := api.env.Pool.Exec(context.Background(),
+		`insert into tool_registry (tenant_id, tool_name, version, "schema", endpoint, is_default)
+		 values ('tenant-a', 'lookup', '3', '{}', 'http://example', true)`)
+	if err == nil {
+		t.Fatalf("database allowed a second default version for the same tool")
+	}
 }
 
 func hashHex(value string) string {

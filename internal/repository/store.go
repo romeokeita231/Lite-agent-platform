@@ -437,6 +437,150 @@ func (s *Store) RecordModelCallLog(ctx context.Context, log domain.ModelCallLog)
 	return err
 }
 
+func (s *Store) CreateTool(ctx context.Context, tool domain.Tool) (domain.Tool, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.Tool{}, err
+	}
+	if tool.TenantID != tenantID {
+		return domain.Tool{}, domain.ErrNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Tool{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if tool.IsDefault {
+		if _, err := tx.Exec(ctx,
+			`update tool_registry set is_default = false
+			 where tenant_id = $1 and tool_name = $2 and is_default`,
+			tenantID, tool.ToolName); err != nil {
+			return domain.Tool{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into tool_registry (tenant_id, tool_name, version, description, "schema", endpoint, is_default)
+		 values ($1, $2, $3, $4, $5, $6, $7)`,
+		tenantID, tool.ToolName, tool.Version, tool.Description, tool.Schema, tool.Endpoint, tool.IsDefault); err != nil {
+		return domain.Tool{}, uniqueToConflict(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Tool{}, err
+	}
+	return tool, nil
+}
+
+func (s *Store) ListTools(ctx context.Context) ([]domain.Tool, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`select tenant_id, tool_name, version, description, "schema", endpoint, is_default
+		 from tool_registry where tenant_id = $1 order by tool_name, version`,
+		tenantID)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Tool, error) {
+		var tool domain.Tool
+		err := row.Scan(&tool.TenantID, &tool.ToolName, &tool.Version, &tool.Description,
+			&tool.Schema, &tool.Endpoint, &tool.IsDefault)
+		return tool, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if tools == nil {
+		tools = []domain.Tool{}
+	}
+	return tools, nil
+}
+
+func (s *Store) GetTool(ctx context.Context, toolName, version string) (domain.Tool, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.Tool{}, err
+	}
+	var tool domain.Tool
+	err = s.pool.QueryRow(ctx,
+		`select tenant_id, tool_name, version, description, "schema", endpoint, is_default
+		 from tool_registry
+		 where tenant_id = $1 and tool_name = $2
+		   and (($3 <> '' and version = $3) or ($3 = '' and is_default))`,
+		tenantID, toolName, version,
+	).Scan(&tool.TenantID, &tool.ToolName, &tool.Version, &tool.Description,
+		&tool.Schema, &tool.Endpoint, &tool.IsDefault)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Tool{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.Tool{}, err
+	}
+	return tool, nil
+}
+
+func (s *Store) CompleteToolCallStep(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span, invocation domain.ToolInvocation) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if checkpoint.TenantID != tenantID || span.TenantID != tenantID || invocation.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	attributes := span.Attributes
+	if len(attributes) == 0 {
+		attributes = json.RawMessage("{}")
+	}
+	args := invocation.Args
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	result := invocation.Result
+	if len(result) == 0 {
+		result = json.RawMessage("null")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
+		 values ($1::uuid, $2, $3, $4, $5, $6)`,
+		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into tool_invocations (id, tenant_id, run_id, tool_name, version, args, result, status, created_at)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9)`,
+		invocation.ID, tenantID, checkpoint.RunID, invocation.ToolName, invocation.Version, args, result, invocation.Status, invocation.CreatedAt,
+	); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx,
+		`update runs set attempt = 0, next_attempt_at = null, updated_at = now()
+		 where id::text = $1 and tenant_id = $2 and status = 'running'`,
+		checkpoint.RunID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
 func modelChainJSON(chain []string) ([]byte, error) {
 	if chain == nil {
 		chain = []string{}

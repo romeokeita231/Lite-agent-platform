@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -22,13 +23,14 @@ type Options struct {
 type Dispatcher struct {
 	store   domain.Store
 	gateway domain.ModelGateway
+	tools   domain.ToolGateway
 	opts    Options
 	client  *policyClient
 	wg      sync.WaitGroup
 }
 
-func New(store domain.Store, gateway domain.ModelGateway, opts Options) *Dispatcher {
-	return &Dispatcher{store: store, gateway: gateway, opts: opts, client: newPolicyClient(opts.StepTimeout)}
+func New(store domain.Store, gateway domain.ModelGateway, tools domain.ToolGateway, opts Options) *Dispatcher {
+	return &Dispatcher{store: store, gateway: gateway, tools: tools, opts: opts, client: newPolicyClient(opts.StepTimeout)}
 }
 
 func (d *Dispatcher) Run(ctx context.Context) {
@@ -262,11 +264,117 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			stepIndex++
 			attempt = 0
 			continue
+		case domain.StepToolCall:
+			tool, err := d.tools.Resolve(ctx, act.Tool, act.Version)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				d.fail(ctx, run.ID, domain.ReasonToolSchemaViolation)
+				return
+			}
+			if err := d.tools.Validate(tool, act.Args); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				d.fail(ctx, run.ID, domain.ReasonToolSchemaViolation)
+				return
+			}
+			runID := run.ID
+			toolStart := time.Now()
+			toolResult, callErr := d.tools.Invoke(ctx, tool, act.Args, fmt.Sprintf("%s:%d", run.ID, stepIndex))
+			finished := time.Now()
+			if callErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				attempt++
+				if attempt >= d.opts.MaxStepAttempts {
+					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					return
+				}
+				if !d.retryLater(ctx, run.ID, attempt) {
+					return
+				}
+				continue
+			}
+
+			result, err := json.Marshal(toolCallResult{
+				Tool:    tool.ToolName,
+				Version: tool.Version,
+				Args:    act.Args,
+				Result:  toolResult,
+			})
+			if err != nil {
+				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
+				return
+			}
+			attributes, _ := json.Marshal(map[string]any{
+				"tool":    tool.ToolName,
+				"version": tool.Version,
+				"attempt": attempt,
+			})
+			checkpoint := domain.Checkpoint{
+				RunID:     run.ID,
+				TenantID:  run.TenantID,
+				StepIndex: stepIndex,
+				StepType:  domain.StepToolCall,
+				Result:    result,
+				CreatedAt: finished,
+			}
+			span := domain.Span{
+				ID:         ids.New(),
+				TenantID:   run.TenantID,
+				RunID:      &runID,
+				StepIndex:  stepIndex,
+				Attempt:    attempt,
+				Name:       "tool." + tool.ToolName,
+				StartedAt:  toolStart,
+				EndedAt:    finished,
+				Attributes: attributes,
+			}
+			invocation := domain.ToolInvocation{
+				ID:        ids.New(),
+				TenantID:  run.TenantID,
+				RunID:     run.ID,
+				ToolName:  tool.ToolName,
+				Version:   tool.Version,
+				Args:      act.Args,
+				Result:    toolResult,
+				Status:    "ok",
+				CreatedAt: finished,
+			}
+			if err := d.store.CompleteToolCallStep(ctx, checkpoint, span, invocation); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				attempt++
+				if attempt >= d.opts.MaxStepAttempts {
+					log.Printf("runtime: complete tool_call run %s: %v", run.ID, err)
+					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					return
+				}
+				if !d.retryLater(ctx, run.ID, attempt) {
+					return
+				}
+				continue
+			}
+			steps = append(steps, checkpoint)
+			stepIndex++
+			attempt = 0
+			continue
 		default:
 			d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 			return
 		}
 	}
+}
+
+type toolCallResult struct {
+	Tool    string          `json:"tool"`
+	Version string          `json:"version"`
+	Args    json.RawMessage `json:"args"`
+	Result  json.RawMessage `json:"result"`
 }
 
 type llmCallResult struct {

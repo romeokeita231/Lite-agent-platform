@@ -23,4 +23,8 @@ type Store interface {
 	CompleteRunStep(ctx context.Context, checkpoint Checkpoint, span Span, output json.RawMessage) error
 	CompleteLLMCallStep(ctx context.Context, checkpoint Checkpoint, span Span, log ModelCallLog) error
 	RecordModelCallLog(ctx context.Context, log ModelCallLog) error
+	CreateTool(ctx context.Context, tool Tool) (Tool, error)
+	ListTools(ctx context.Context) ([]Tool, error)
+	GetTool(ctx context.Context, toolName, version string) (Tool, error)
+	CompleteToolCallStep(ctx context.Context, checkpoint Checkpoint, span Span, invocation ToolInvocation) error
 }
