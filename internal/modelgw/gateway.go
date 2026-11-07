@@ -21,7 +21,7 @@ type Client struct {
 	apiKey     string
 	budget     time.Duration
 	httpClient *http.Client
-	metrics    *observability.Metrics
+	metrics    observability.Recorder
 }
 
 func New(baseURL, apiKey string, budget time.Duration) *Client {
@@ -38,7 +38,7 @@ func NewWithStore(store domain.Store, baseURL, apiKey string, budget time.Durati
 	}
 }
 
-func (c *Client) SetMetrics(metrics *observability.Metrics) {
+func (c *Client) SetMetrics(metrics observability.Recorder) {
 	c.metrics = metrics
 }
 
@@ -74,13 +74,13 @@ func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.
 			break
 		}
 		if index > 0 && c.metrics != nil {
-			c.metrics.ModelFallbacks.Inc()
+			c.metrics.IncModelFallback()
 		}
 		attemptStarted := time.Now()
 		content, inputTokens, outputTokens, callErr := c.callModel(callCtx, model, req)
 		attemptEnded := time.Now()
 		if c.metrics != nil {
-			c.metrics.ModelCallDuration.Observe(attemptEnded.Sub(attemptStarted).Seconds())
+			c.metrics.ObserveModelCallDuration(attemptEnded.Sub(attemptStarted).Seconds())
 		}
 		attempt := domain.ModelAttempt{
 			Model:     model,

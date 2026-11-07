@@ -7,6 +7,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type Recorder interface {
+	SetRunStatus(status string, count int)
+	ObserveTenantInflight(count int)
+	IncStepRetry()
+	IncModelFallback()
+	ObserveModelCallDuration(seconds float64)
+	IncToolCall(status string)
+	ObserveContext(tokens, dropped int)
+}
+
 type Metrics struct {
 	registry            *prometheus.Registry
 	Runs                *prometheus.GaugeVec
@@ -76,4 +86,33 @@ func NewMetrics() *Metrics {
 
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+}
+
+func (m *Metrics) SetRunStatus(status string, count int) {
+	m.Runs.WithLabelValues(status).Set(float64(count))
+}
+
+func (m *Metrics) ObserveTenantInflight(count int) {
+	m.TenantInflight.Observe(float64(count))
+}
+
+func (m *Metrics) IncStepRetry() {
+	m.StepRetries.Inc()
+}
+
+func (m *Metrics) IncModelFallback() {
+	m.ModelFallbacks.Inc()
+}
+
+func (m *Metrics) ObserveModelCallDuration(seconds float64) {
+	m.ModelCallDuration.Observe(seconds)
+}
+
+func (m *Metrics) IncToolCall(status string) {
+	m.ToolCalls.WithLabelValues(status).Inc()
+}
+
+func (m *Metrics) ObserveContext(tokens, dropped int) {
+	m.ContextTokens.Observe(float64(tokens))
+	m.ContextDroppedSteps.Add(float64(dropped))
 }

@@ -20,20 +20,20 @@ type Client struct {
 	store      domain.Store
 	timeout    time.Duration
 	httpClient *http.Client
-	metrics    *observability.Metrics
+	metrics    observability.Recorder
 }
 
 func New(store domain.Store, timeout time.Duration) *Client {
 	return &Client{store: store, timeout: timeout, httpClient: &http.Client{}}
 }
 
-func (c *Client) SetMetrics(metrics *observability.Metrics) {
+func (c *Client) SetMetrics(metrics observability.Recorder) {
 	c.metrics = metrics
 }
 
 func (c *Client) Resolve(ctx context.Context, toolName, version string) (domain.Tool, error) {
 	if toolName == "" {
-		return domain.Tool{}, domain.ErrToolNotFound
+		return domain.Tool{}, domain.ErrNotFound
 	}
 	return c.store.GetTool(ctx, toolName, version)
 }
@@ -68,7 +68,7 @@ func (c *Client) Invoke(ctx context.Context, tool domain.Tool, args json.RawMess
 			if err != nil {
 				status = "error"
 			}
-			c.metrics.ToolCalls.WithLabelValues(status).Inc()
+			c.metrics.IncToolCall(status)
 		}()
 	}
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)

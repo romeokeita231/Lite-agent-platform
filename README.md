@@ -21,7 +21,7 @@ code in its own process. See [ADR 0008](docs/adr/0008-go-for-platform-and-policy
 
 Six lines. If any of them ever disagree with an ADR, the ADR wins.
 
-1. A tenant posts `POST /v1/runs` with an agent name and an input. The run is `queued`.
+1. A tenant posts `POST /v1/runs` with an `agent_id` and an input. The run is `queued`.
 2. The platform asks that agent's Policy one question: what is the next step?
 3. The Policy answers with an action — call a model, call a tool, or ask a human.
 4. The platform performs the action, appends one Checkpoint, and writes the Span beside

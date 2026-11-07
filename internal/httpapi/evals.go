@@ -240,8 +240,7 @@ func (a *API) waitEvalRun(ctx context.Context, runID string) (domain.Run, error)
 			}
 			return domain.Run{}, err
 		}
-		switch run.Status {
-		case domain.RunCompleted, domain.RunFailed, domain.RunCancelled:
+		if run.Status.Terminal() {
 			return run, nil
 		}
 		select {

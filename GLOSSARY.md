@@ -17,7 +17,7 @@ _Avoid_: 用户、账号、project
 _Avoid_: task、job、execution、会话
 
 **Step**:
-Run 里由**平台**发起的一次动作，只有三种：调一次模型、调一次工具、移交一次人工。步骤边界归平台，不归业务侧。
+Run 里由**平台**发起的一次动作，只有三种：调一次模型、调一次工具、移交一次人工。Policy 返回 `done` 时平台仍会写入 `step_type=done` 的终态 Checkpoint，那只是收尾记录，不是第四种动作。步骤边界归平台，不归业务侧。
 _Avoid_: 阶段、node、super-step、iteration
 
 **Checkpoint**:

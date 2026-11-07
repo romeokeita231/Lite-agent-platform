@@ -34,6 +34,14 @@ const (
 	RunCancelled    RunStatus = "cancelled"
 )
 
+func (s RunStatus) Terminal() bool {
+	switch s {
+	case RunCompleted, RunFailed, RunCancelled:
+		return true
+	}
+	return false
+}
+
 type TerminalReason string
 
 const (
@@ -134,6 +142,11 @@ const (
 	ModelStatusError = "error"
 )
 
+const (
+	ToolStatusOK    = "ok"
+	ToolStatusError = "error"
+)
+
 type ModelMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -190,15 +203,18 @@ type ToolGateway interface {
 }
 
 type ToolInvocation struct {
-	ID        string
-	TenantID  string
-	RunID     string
-	ToolName  string
-	Version   string
-	Args      json.RawMessage
-	Result    json.RawMessage
-	Status    string
-	CreatedAt time.Time
+	ID             string
+	TenantID       string
+	RunID          string
+	ToolName       string
+	Version        string
+	Args           json.RawMessage
+	Result         json.RawMessage
+	Status         string
+	CreatedAt      time.Time
+	StepIndex      int
+	IdempotencyKey string
+	LatencyMS      int64
 }
 
 type EvalReport struct {
