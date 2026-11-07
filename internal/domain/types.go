@@ -148,13 +148,19 @@ type ModelGateway interface {
 }
 
 type Tool struct {
-	TenantID    string
-	ToolName    string
-	Version     string
-	Description string
-	Schema      json.RawMessage
-	Endpoint    string
-	IsDefault   bool
+	TenantID    string          `json:"tenant_id"`
+	ToolName    string          `json:"tool_name"`
+	Version     string          `json:"version"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema"`
+	Endpoint    string          `json:"endpoint"`
+	IsDefault   bool            `json:"is_default"`
+}
+
+type ToolGateway interface {
+	Resolve(ctx context.Context, toolName, version string) (Tool, error)
+	Validate(tool Tool, args json.RawMessage) error
+	Invoke(ctx context.Context, tool Tool, args json.RawMessage, idempotencyKey string) (json.RawMessage, error)
 }
 
 type ToolInvocation struct {

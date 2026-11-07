@@ -20,11 +20,12 @@ type Readiness interface {
 
 type API struct {
 	store domain.Store
+	tools domain.ToolGateway
 }
 
-func NewMux(ready Readiness, store domain.Store) *http.ServeMux {
+func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway) *http.ServeMux {
 	mux := http.NewServeMux()
-	api := &API{store: store}
+	api := &API{store: store, tools: tools}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -44,6 +45,9 @@ func NewMux(ready Readiness, store domain.Store) *http.ServeMux {
 	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
+	mux.Handle("POST /v1/tools", api.authenticated(http.HandlerFunc(api.createTool)))
+	mux.Handle("GET /v1/tools", api.authenticated(http.HandlerFunc(api.listTools)))
+	mux.Handle("POST /v1/tools/{tool_name}/invoke", api.authenticated(http.HandlerFunc(api.invokeTool)))
 	return mux
 }
 

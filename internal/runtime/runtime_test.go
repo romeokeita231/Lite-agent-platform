@@ -21,6 +21,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
+	"github.com/romeokeita231/Lite-agent-platform/internal/toolgw"
 )
 
 type alwaysReady struct{}
@@ -151,11 +152,11 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, stepTimeout)))
 	t.Cleanup(e.srv.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	dispatcher := agentruntime.New(store, gateway, agentruntime.Options{
+	dispatcher := agentruntime.New(store, gateway, toolgw.New(store, stepTimeout), agentruntime.Options{
 		StepTimeout:     stepTimeout,
 		MaxStepAttempts: maxAttempts,
 		PollInterval:    10 * time.Millisecond,

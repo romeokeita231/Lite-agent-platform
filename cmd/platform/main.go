@@ -24,6 +24,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
+	"github.com/romeokeita231/Lite-agent-platform/internal/toolgw"
 )
 
 const (
@@ -84,14 +85,15 @@ func run() error {
 
 	store := repository.New(pool)
 	gateway := modelgw.New(cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
-	dispatcher := agentruntime.New(store, gateway, agentruntime.Options{
+	tools := toolgw.New(store, cfg.StepTimeout)
+	dispatcher := agentruntime.New(store, gateway, tools, agentruntime.Options{
 		StepTimeout:     cfg.StepTimeout,
 		MaxStepAttempts: cfg.MaxStepAttempts,
 		PollInterval:    cfg.PollInterval,
 	})
 	go dispatcher.Run(ctx)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools)}
 
 	go func() {
 		<-ctx.Done()

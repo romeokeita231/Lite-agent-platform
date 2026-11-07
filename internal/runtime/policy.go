@@ -45,6 +45,9 @@ type action struct {
 	Output   json.RawMessage
 	Route    string
 	Messages []domain.ModelMessage
+	Tool     string
+	Version  string
+	Args     json.RawMessage
 }
 
 type stepFailure struct {
@@ -147,6 +150,9 @@ func parseAction(body []byte) (action, error) {
 		Output   json.RawMessage `json:"output"`
 		Route    json.RawMessage `json:"route"`
 		Messages json.RawMessage `json:"messages"`
+		Tool     json.RawMessage `json:"tool"`
+		Version  json.RawMessage `json:"version"`
+		Args     json.RawMessage `json:"args"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return invalid("invalid policy response JSON")
@@ -176,6 +182,25 @@ func parseAction(body []byte) (action, error) {
 			return invalid(err.Error())
 		}
 		return action{Kind: kind, Route: route, Messages: messages}, nil
+	case domain.StepToolCall:
+		var tool string
+		if len(raw.Tool) == 0 || json.Unmarshal(raw.Tool, &tool) != nil || tool == "" {
+			return invalid("tool_call tool must be a non-empty string")
+		}
+		var version string
+		if len(raw.Version) > 0 && string(raw.Version) != "null" {
+			if err := json.Unmarshal(raw.Version, &version); err != nil {
+				return invalid("tool_call version must be a string")
+			}
+		}
+		if len(raw.Args) == 0 || string(raw.Args) == "null" {
+			return invalid("tool_call args must be an object")
+		}
+		var args map[string]json.RawMessage
+		if err := json.Unmarshal(raw.Args, &args); err != nil {
+			return invalid("tool_call args must be an object")
+		}
+		return action{Kind: kind, Tool: tool, Version: version, Args: raw.Args}, nil
 	default:
 		return invalid("unsupported action " + kind)
 	}
