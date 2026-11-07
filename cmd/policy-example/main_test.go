@@ -145,6 +145,15 @@ func TestModelToolAndHealthEndpoints(t *testing.T) {
 		t.Fatalf("healthz = %d", resp.StatusCode)
 	}
 
+	readyResp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("readyz: %v", err)
+	}
+	defer readyResp.Body.Close()
+	if readyResp.StatusCode != http.StatusOK {
+		t.Fatalf("readyz = %d", readyResp.StatusCode)
+	}
+
 	chatBody := []byte(`{"model":"demo-model","messages":[{"role":"user","content":"hi"}]}`)
 	chatResp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", bytes.NewReader(chatBody))
 	if err != nil {

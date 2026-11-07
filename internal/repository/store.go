@@ -242,24 +242,30 @@ func (s *Store) ListRunnableRuns(ctx context.Context) ([]domain.Run, error) {
 	return runs, nil
 }
 
-// ClaimRun is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) ClaimRun(ctx context.Context, id string) (bool, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return false, err
+	}
 	tag, err := s.pool.Exec(ctx,
 		`update runs set status = 'running', updated_at = now()
-		 where id::text = $1 and status = 'queued'`,
-		id)
+		 where id::text = $1 and tenant_id = $2 and status = 'queued'`,
+		id, tenantID)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-// RescheduleStep is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) RescheduleStep(ctx context.Context, id string, attempt int, nextAttemptAt time.Time) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx,
 		`update runs set attempt = $2, next_attempt_at = $3, updated_at = now()
-		 where id::text = $1 and status = 'running'`,
-		id, attempt, nextAttemptAt)
+		 where id::text = $1 and tenant_id = $4 and status = 'running'`,
+		id, attempt, nextAttemptAt, tenantID)
 	if err != nil {
 		return err
 	}
@@ -269,12 +275,15 @@ func (s *Store) RescheduleStep(ctx context.Context, id string, attempt int, next
 	return nil
 }
 
-// MarkRunFailed is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) MarkRunFailed(ctx context.Context, id string, reason domain.TerminalReason) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx,
 		`update runs set status = 'failed', terminal_reason = $2, ended_at = now(), updated_at = now()
-		 where id::text = $1 and status in ('queued', 'running')`,
-		id, string(reason))
+		 where id::text = $1 and tenant_id = $3 and status in ('queued', 'running')`,
+		id, string(reason), tenantID)
 	if err != nil {
 		return err
 	}
@@ -365,13 +374,16 @@ func (s *Store) CancelRequested(ctx context.Context, id string) (bool, error) {
 	return requested, nil
 }
 
-// MarkCancelled is a dispatcher method that intentionally ignores the tenant filter.
 func (s *Store) MarkCancelled(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx,
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
 		`update runs set status = 'cancelled', terminal_reason = $2, cancel_requested = true,
 		        ended_at = now(), updated_at = now()
-		 where id::text = $1 and status in ('queued', 'running')`,
-		id, string(domain.ReasonCancelledByTenant))
+		 where id::text = $1 and tenant_id = $3 and status in ('queued', 'running')`,
+		id, string(domain.ReasonCancelledByTenant), tenantID)
 	return err
 }
 
@@ -641,7 +653,7 @@ func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Check
 	); err != nil {
 		return err
 	}
-	if err := insertSpans(ctx, tx, tenantID, &runID, checkpoint.StepIndex, spans); err != nil {
+	if err := insertSpans(ctx, tx, tenantID, &runID, spans); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -688,7 +700,7 @@ func (s *Store) RecordModelCallAttempts(ctx context.Context, spans []domain.Span
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertSpans(ctx, tx, tenantID, log.RunID, 0, spans); err != nil {
+	if err := insertSpans(ctx, tx, tenantID, log.RunID, spans); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -1120,7 +1132,7 @@ type spanInserter interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-func insertSpans(ctx context.Context, db spanInserter, tenantID string, runID *string, stepIndex int, spans []domain.Span) error {
+func insertSpans(ctx context.Context, db spanInserter, tenantID string, runID *string, spans []domain.Span) error {
 	for _, span := range spans {
 		attributes := span.Attributes
 		if len(attributes) == 0 {
@@ -1129,7 +1141,7 @@ func insertSpans(ctx context.Context, db spanInserter, tenantID string, runID *s
 		if _, err := db.Exec(ctx,
 			`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
 			 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-			span.ID, tenantID, runID, stepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+			span.ID, tenantID, runID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
 		); err != nil {
 			return err
 		}

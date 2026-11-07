@@ -69,7 +69,7 @@ func newTraceUpstream(t *testing.T) *httptest.Server {
 			Model string `json:"model"`
 		}
 		_ = json.Unmarshal(body, &request)
-		if request.Model == "m1" {
+		if request.Model == "m1" || request.Model == "bad" || request.Model == "worse" {
 			http.Error(w, "rate limited", http.StatusTooManyRequests)
 			return
 		}
@@ -162,6 +162,71 @@ func waitTraceRun(t *testing.T, e *apiEnv, runID string, want domain.RunStatus, 
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("run %s did not reach %s", runID, want)
+}
+
+func TestRunTraceKeepsRetriedFallbackAtRealStepIndex(t *testing.T) {
+	const secret = "trace-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	policy := newTracePolicy(t, secret, func(step int) string {
+		if step == 0 {
+			return `{"action":"llm_call","route":"ok","messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"action":"llm_call","route":"route:broken","messages":[{"role":"user","content":"hi"}]}`
+	})
+	upstream := newTraceUpstream(t)
+	e := newTraceEnv(t, upstream.URL+"/v1")
+	ctx := repository.WithTenant(context.Background(), "tenant-a")
+	if _, err := repository.New(e.env.Pool).UpsertModelRoute(ctx, domain.ModelRoute{
+		TenantID: "tenant-a", Label: "broken", Chain: []string{"bad", "worse"},
+	}); err != nil {
+		t.Fatalf("upsert route: %v", err)
+	}
+
+	status, raw := e.do(t, http.MethodPost, "/v1/agents", "tenant-a", map[string]string{
+		"name":       "alpha",
+		"policy_url": policy.URL,
+		"secret_env": "POLICY_SECRET_ALPHA",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create agent status = %d body=%s", status, raw)
+	}
+	var agent domain.Agent
+	if err := json.Unmarshal(raw, &agent); err != nil {
+		t.Fatalf("decode agent: %v", err)
+	}
+	status, raw = e.do(t, http.MethodPost, "/v1/runs", "tenant-a", map[string]any{"agent_id": agent.ID})
+	if status != http.StatusCreated {
+		t.Fatalf("create run status = %d body=%s", status, raw)
+	}
+	var run domain.Run
+	if err := json.Unmarshal(raw, &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	waitTraceRun(t, e, run.ID, domain.RunFailed, 10*time.Second)
+
+	status, raw = e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/trace", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("trace status = %d body=%s", status, raw)
+	}
+	var trace tracePayload
+	if err := json.Unmarshal(raw, &trace); err != nil {
+		t.Fatalf("decode trace %s: %v", raw, err)
+	}
+	if len(trace.Steps) != 2 || trace.Steps[0].StepIndex != 0 || trace.Steps[1].StepIndex != 1 {
+		t.Fatalf("trace steps = %+v", trace.Steps)
+	}
+	if step0 := trace.Steps[0].Spans; len(step0) != 1 || step0[0].Name != "model.ok" {
+		t.Fatalf("step 0 spans = %+v", step0)
+	}
+	step1 := trace.Steps[1].Spans
+	if len(step1) != 6 {
+		t.Fatalf("step 1 spans = %d, want 6", len(step1))
+	}
+	for _, span := range step1 {
+		if span.Name != "model.bad" && span.Name != "model.worse" {
+			t.Fatalf("step 1 span = %+v", span)
+		}
+	}
 }
 
 func TestRunTraceGroupsSpansByStepAndKeepsFallbackAttempts(t *testing.T) {

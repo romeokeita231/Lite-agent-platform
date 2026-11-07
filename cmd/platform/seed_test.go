@@ -11,6 +11,30 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
 )
 
+func TestSeedKeysUsesEnvAndGeneratesRandomDefaults(t *testing.T) {
+	t.Setenv("DEMO_API_KEY_A", "")
+	t.Setenv("DEMO_API_KEY_B", "")
+	keyA, keyB, err := seedKeys()
+	if err != nil {
+		t.Fatalf("seedKeys: %v", err)
+	}
+	if len(keyA) != 64 || len(keyB) != 64 {
+		t.Fatalf("generated keys = %q %q", keyA, keyB)
+	}
+	if keyA == keyB || keyA == "demo-a-api-key" || keyB == "demo-b-api-key" {
+		t.Fatalf("generated keys are not random: %q %q", keyA, keyB)
+	}
+
+	t.Setenv("DEMO_API_KEY_A", "env-key-a")
+	keyA, keyB, err = seedKeys()
+	if err != nil {
+		t.Fatalf("seedKeys with env: %v", err)
+	}
+	if keyA != "env-key-a" || len(keyB) != 64 {
+		t.Fatalf("seedKeys with env = %q %q", keyA, keyB)
+	}
+}
+
 func TestSeedIsIdempotentAndStoresHashedKeys(t *testing.T) {
 	env := testutil.New(t)
 	const (

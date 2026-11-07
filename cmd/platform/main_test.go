@@ -59,6 +59,41 @@ func TestKeygenPrintsPlaintextHashAndPrefixOnce(t *testing.T) {
 	}
 }
 
+func TestPlatformStaysAliveWhenDatabaseUnreachable(t *testing.T) {
+	bin := buildPlatform(t)
+	addr := recoveryFreeAddr(t)
+	dbURL := "postgres://postgres:postgres@" + recoveryFreeAddr(t) + "/platform?sslmode=disable&connect_timeout=1"
+	startPlatform(t, bin, dbURL, addr, "unused-secret", "http://127.0.0.1:1/v1")
+	base := "http://" + addr
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := http.Get(base + "/healthz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("healthz never became available")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if status := getStatus(t, base+"/readyz"); status != http.StatusServiceUnavailable {
+		t.Fatalf("readyz with unreachable database = %d, want 503", status)
+	}
+
+	time.Sleep(2 * time.Second)
+	if status := getStatus(t, base+"/healthz"); status != http.StatusOK {
+		t.Fatalf("healthz after database outage = %d, want 200", status)
+	}
+	if status := getStatus(t, base+"/readyz"); status != http.StatusServiceUnavailable {
+		t.Fatalf("readyz after database outage = %d, want 503", status)
+	}
+}
+
 func TestReadinessFlipsWithDatabaseRecovery(t *testing.T) {
 	dbURL := testutil.URL(t)
 	parsed, err := url.Parse(dbURL)

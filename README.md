@@ -13,10 +13,9 @@ It is all Go, and the policy is a separate Go binary talking the same HTTP contr
 split is not about languages — it is about the platform never executing someone else's
 code in its own process. See [ADR 0008](docs/adr/0008-go-for-platform-and-policy.md).
 
-> **Status: implemented and runnable.** The platform, the example policy and a local
-> demo stack exist in this repository. Decisions live in
-> [`docs/adr/`](docs/adr/) and win wherever they disagree with the code; shared
-> vocabulary in [`GLOSSARY.md`](GLOSSARY.md).
+> **状态：已实现且可运行。** 本仓库包含平台、示例 Policy 和本地演示栈。决策记录在
+> [`docs/adr/`](docs/adr/)，与代码冲突时以 ADR 为准；共享术语见
+> [`GLOSSARY.md`](GLOSSARY.md)。
 
 ## How a run works
 
@@ -42,36 +41,34 @@ Six lines. If any of them ever disagree with an ADR, the ADR wins.
 - Not polyglot. There is one toolchain here on purpose; the boundary that matters is a
   process boundary, not a language boundary.
 
-## Local demo
+## 本地演示
 
-`docker compose up --build` starts PostgreSQL, `platform` and `policy-example`. The
-platform container runs `platform seed` before the server: it creates tenants `demo-a`
-and `demo-b`, the agents `demo`, `tool-slow` and `human`, the `default` model route
-(`demo-model`) and the `echo`/`slow` tools. Seeding is idempotent and prints one JSON
-line with both tenant IDs, their plaintext API keys and the policy URL; those keys are
-printed nowhere else.
+`docker compose up --build` 启动 PostgreSQL、`platform` 和 `policy-example`。平台容器
+在启动服务前执行 `platform seed`：创建租户 `demo-a` 和 `demo-b`，Agent `demo`、
+`tool-slow`、`human`，`default` 模型路由（`demo-model`），以及 `echo`/`slow` 工具。
+seed 是幂等的，并输出一行 JSON，包含两个租户 ID、各自的明文 API key 和 policy URL；
+这些 key 不会在别处打印。
 
 ```sh
 cp .env.example .env
 docker compose up --build
 ```
 
-`MODEL_BASE_URL` defaults to `policy-example`'s own OpenAI-compatible
-`/v1/chat/completions` stub, so every demo run performs a real HTTP model call. Point it
-at another OpenAI-compatible provider and set `MODEL_API_KEY` to use that provider
-instead.
+`MODEL_BASE_URL` 默认指向 `policy-example` 自带的 OpenAI 兼容
+`/v1/chat/completions` stub，因此每次演示 run 都会发起真实的 HTTP 模型调用。把它指向
+其他 OpenAI 兼容服务并设置 `MODEL_API_KEY`，即可改用该服务。
 
-Three PowerShell scripts demonstrate the isolation properties in
-[ADR 0012](docs/adr/0012-one-binary-split-ready.md):
+三个 PowerShell 脚本演示 [ADR 0012](docs/adr/0012-one-binary-split-ready.md) 中的
+隔离特性：
 
-| script | shows |
+| 脚本 | 演示内容 |
 | --- | --- |
-| `scripts/demo-1-concurrency.ps1` | tenant A saturates its concurrency limit; tenant B's run is not queued behind it |
-| `scripts/demo-2-tool-hang.ps1` | a hung tool endpoint fails one run after `STEP_TIMEOUT`; the other runs complete |
-| `scripts/demo-3-crash.ps1` | killing the policy shows retries and `policy_unreachable`; killing the platform mid-run resumes from the ledger |
+| `scripts/demo-1-concurrency.ps1` | 租户 A 占满自己的并发上限时，租户 B 的 run 不会被排在它后面 |
+| `scripts/demo-2-tool-hang.ps1` | 工具端点挂起时，一个 run 在 `STEP_TIMEOUT` 后失败；其他 run 正常完成 |
+| `scripts/demo-3-crash.ps1` | 杀掉 policy 会看到重试和 `policy_unreachable`；运行中杀掉 platform，run 会从 ledger 恢复 |
 
-Each accepts `-BaseUrl`, `-ApiKeyA` and `-ApiKeyB` (matching the seed output), and exits
-non-zero on failure, e.g. `powershell -File scripts/demo-1-concurrency.ps1`.
+每个脚本接受 `-BaseUrl`、`-ApiKeyA`、`-ApiKeyB`（与 seed 输出一致），失败时以非零
+退出，例如 `powershell -File scripts/demo-1-concurrency.ps1`。
 
 ## Documents
 

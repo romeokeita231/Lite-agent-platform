@@ -17,8 +17,6 @@ import (
 )
 
 const (
-	demoKeyA         = "demo-a-api-key"
-	demoKeyB         = "demo-b-api-key"
 	defaultPolicyURL = "http://policy-example:9090"
 )
 
@@ -47,12 +45,9 @@ func runSeed(w io.Writer) error {
 	if err := migrate.Run(ctx, pool); err != nil {
 		return err
 	}
-	keyA, keyB := demoKeyA, demoKeyB
-	if value := os.Getenv("DEMO_API_KEY_A"); value != "" {
-		keyA = value
-	}
-	if value := os.Getenv("DEMO_API_KEY_B"); value != "" {
-		keyB = value
+	keyA, keyB, err := seedKeys()
+	if err != nil {
+		return err
 	}
 	policyURL := defaultPolicyURL
 	if value := os.Getenv("POLICY_URL"); value != "" {
@@ -60,6 +55,23 @@ func runSeed(w io.Writer) error {
 	}
 	_, err = seed(ctx, pool, policyURL, keyA, keyB, w)
 	return err
+}
+
+func seedKeys() (string, string, error) {
+	keyA := os.Getenv("DEMO_API_KEY_A")
+	keyB := os.Getenv("DEMO_API_KEY_B")
+	var err error
+	if keyA == "" {
+		if keyA, err = newAPIKey(); err != nil {
+			return "", "", err
+		}
+	}
+	if keyB == "" {
+		if keyB, err = newAPIKey(); err != nil {
+			return "", "", err
+		}
+	}
+	return keyA, keyB, nil
 }
 
 func seed(ctx context.Context, pool *pgxpool.Pool, policyURL, keyA, keyB string, w io.Writer) (seedResult, error) {
