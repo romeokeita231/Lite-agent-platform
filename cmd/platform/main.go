@@ -78,12 +78,19 @@ func run() error {
 	}
 	defer pool.Close()
 
+	store := repository.New(pool)
+	if err := migrate.Run(ctx, pool); err != nil {
+		return err
+	}
+	if err := store.ResetRunningRuns(ctx); err != nil {
+		return err
+	}
+
 	ready := observability.NewReadiness()
-	maint := &dbMaintenance{pool: pool, ready: ready}
-	maint.check(ctx)
+	ready.SetReady(true)
+	maint := &dbMaintenance{pool: pool, ready: ready, migrated: true}
 	go maint.loop(ctx, maintenanceInterval)
 
-	store := repository.New(pool)
 	gateway := modelgw.New(cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
 	tools := toolgw.New(store, cfg.StepTimeout)
 	dispatcher := agentruntime.New(store, gateway, tools, agentruntime.Options{

@@ -310,6 +310,92 @@ func TestDispatcherRunAccessIgnoresTenantFilter(t *testing.T) {
 	}
 }
 
+func TestResetRunningRunsIgnoresTenantFilter(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+
+	runA := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	runB := createTestRun(t, store, ctxB, "tenant-b", "agent-b")
+	finished := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+
+	for _, id := range []string{runA.ID, runB.ID, finished.ID} {
+		claimed, err := store.ClaimRun(context.Background(), id)
+		if err != nil || !claimed {
+			t.Fatalf("claim run %s: claimed=%v err=%v", id, claimed, err)
+		}
+	}
+	if err := store.RescheduleStep(context.Background(), runA.ID, 3, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("reschedule run a: %v", err)
+	}
+	if _, err := env.Pool.Exec(context.Background(),
+		`update runs set cancel_requested = true where id::text = $1`, runB.ID); err != nil {
+		t.Fatalf("mark run b cancelled: %v", err)
+	}
+	if err := store.MarkRunFailed(ctxA, finished.ID, domain.ReasonMaxRetries); err != nil {
+		t.Fatalf("fail finished run: %v", err)
+	}
+	before, err := store.GetRun(ctxA, runA.ID)
+	if err != nil {
+		t.Fatalf("get run a before reset: %v", err)
+	}
+
+	if err := store.ResetRunningRuns(context.Background()); err != nil {
+		t.Fatalf("reset running runs: %v", err)
+	}
+
+	cases := []struct {
+		ctx    context.Context
+		id     string
+		tenant string
+	}{
+		{ctxA, runA.ID, "tenant-a"},
+		{ctxB, runB.ID, "tenant-b"},
+	}
+	for _, tc := range cases {
+		run, err := store.GetRun(tc.ctx, tc.id)
+		if err != nil {
+			t.Fatalf("get run %s after reset: %v", tc.id, err)
+		}
+		if run.Status != domain.RunQueued || run.Attempt != 0 || run.NextAttemptAt != nil {
+			t.Fatalf("run %s after reset = %+v", tc.tenant, run)
+		}
+		if !run.UpdatedAt.After(before.UpdatedAt) {
+			t.Fatalf("run %s updated_at did not advance: %s", tc.tenant, run.UpdatedAt)
+		}
+	}
+
+	var cancelB bool
+	if err := env.Pool.QueryRow(context.Background(),
+		`select cancel_requested from runs where id::text = $1`, runB.ID).Scan(&cancelB); err != nil {
+		t.Fatalf("read cancel_requested: %v", err)
+	}
+	if !cancelB {
+		t.Fatalf("reset cleared cancel_requested on run b")
+	}
+
+	finishedRun, err := store.GetRun(ctxA, finished.ID)
+	if err != nil {
+		t.Fatalf("get finished run: %v", err)
+	}
+	if finishedRun.Status != domain.RunFailed || finishedRun.EndedAt == nil {
+		t.Fatalf("reset touched a non-running run: %+v", finishedRun)
+	}
+
+	runnable, err := store.ListRunnableRuns(context.Background())
+	if err != nil {
+		t.Fatalf("list runnable runs: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, run := range runnable {
+		seen[run.ID] = true
+	}
+	if !seen[runA.ID] || !seen[runB.ID] || seen[finished.ID] {
+		t.Fatalf("runnable runs after reset = %+v", runnable)
+	}
+}
+
 func TestCompleteRunStepWritesCheckpointSpanAndCompletion(t *testing.T) {
 	env := testutil.New(t)
 	store := repository.New(env.Pool)
