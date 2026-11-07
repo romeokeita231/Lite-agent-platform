@@ -595,7 +595,7 @@ func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
 		LatencyMS:      7,
 		Status:         domain.ModelStatusOK,
 	}
-	if err := store.CompleteLLMCallStep(ctxA, checkpoint, span, log); err != nil {
+	if err := store.CompleteLLMCallStep(ctxA, checkpoint, []domain.Span{span}, log); err != nil {
 		t.Fatalf("complete llm call step: %v", err)
 	}
 
@@ -636,10 +636,10 @@ func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
 		t.Fatalf("model call log = chain %v tokens %d/%d status %q", chain, inputTokens, outputTokens, logStatus)
 	}
 
-	if err := store.CompleteLLMCallStep(ctxB, checkpoint, span, log); !errors.Is(err, domain.ErrNotFound) {
+	if err := store.CompleteLLMCallStep(ctxB, checkpoint, []domain.Span{span}, log); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross-tenant complete error = %v, want ErrNotFound", err)
 	}
-	if err := store.CompleteLLMCallStep(context.Background(), checkpoint, span, log); !errors.Is(err, domain.ErrNoTenant) {
+	if err := store.CompleteLLMCallStep(context.Background(), checkpoint, []domain.Span{span}, log); !errors.Is(err, domain.ErrNoTenant) {
 		t.Fatalf("complete without tenant error = %v, want ErrNoTenant", err)
 	}
 	if err := store.RecordModelCallLog(ctxB, log); !errors.Is(err, domain.ErrNotFound) {

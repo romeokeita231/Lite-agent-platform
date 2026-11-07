@@ -547,18 +547,20 @@ func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoin
 	return tx.Commit(ctx)
 }
 
-func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span, log domain.ModelCallLog) error {
+func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Checkpoint, spans []domain.Span, log domain.ModelCallLog) error {
 	tenantID, err := TenantOf(ctx)
 	if err != nil {
 		return err
 	}
-	if checkpoint.TenantID != tenantID || span.TenantID != tenantID || log.TenantID != tenantID {
+	if checkpoint.TenantID != tenantID || log.TenantID != tenantID {
 		return domain.ErrNotFound
 	}
-	attributes := span.Attributes
-	if len(attributes) == 0 {
-		attributes = json.RawMessage("{}")
+	for _, span := range spans {
+		if span.TenantID != tenantID {
+			return domain.ErrNotFound
+		}
 	}
+	runID := checkpoint.RunID
 	chain, err := modelChainJSON(log.Chain)
 	if err != nil {
 		return err
@@ -576,11 +578,7 @@ func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Check
 	); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx,
-		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
-		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
-	); err != nil {
+	if err := insertSpans(ctx, tx, tenantID, &runID, checkpoint.StepIndex, spans); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -603,6 +601,116 @@ func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Check
 		return domain.ErrNotFound
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) RecordModelCallAttempts(ctx context.Context, spans []domain.Span, log domain.ModelCallLog) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if log.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	for _, span := range spans {
+		if span.TenantID != tenantID {
+			return domain.ErrNotFound
+		}
+	}
+	chain, err := modelChainJSON(log.Chain)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertSpans(ctx, tx, tenantID, log.RunID, 0, spans); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
+		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
+		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
+		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status,
+	); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) UpsertModelRoute(ctx context.Context, route domain.ModelRoute) (domain.ModelRoute, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.ModelRoute{}, err
+	}
+	if route.TenantID != tenantID {
+		return domain.ModelRoute{}, domain.ErrNotFound
+	}
+	if route.Chain == nil {
+		route.Chain = []string{}
+	}
+	chain, err := json.Marshal(route.Chain)
+	if err != nil {
+		return domain.ModelRoute{}, err
+	}
+	err = s.pool.QueryRow(ctx,
+		`insert into model_routes (tenant_id, label, chain) values ($1, $2, $3)
+		 on conflict (tenant_id, label) do update set chain = excluded.chain
+		 returning chain, created_at`,
+		route.TenantID, route.Label, chain,
+	).Scan(&route.Chain, &route.CreatedAt)
+	if err != nil {
+		return domain.ModelRoute{}, err
+	}
+	return route, nil
+}
+
+func (s *Store) GetModelRoute(ctx context.Context, label string) (domain.ModelRoute, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return domain.ModelRoute{}, err
+	}
+	var route domain.ModelRoute
+	err = s.pool.QueryRow(ctx,
+		`select tenant_id, label, chain, created_at
+		 from model_routes where tenant_id = $1 and label = $2`,
+		tenantID, label,
+	).Scan(&route.TenantID, &route.Label, &route.Chain, &route.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ModelRoute{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.ModelRoute{}, err
+	}
+	return route, nil
+}
+
+func (s *Store) ListModelRoutes(ctx context.Context) ([]domain.ModelRoute, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`select tenant_id, label, chain, created_at
+		 from model_routes where tenant_id = $1 order by label`,
+		tenantID)
+	if err != nil {
+		return nil, err
+	}
+	routes, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.ModelRoute, error) {
+		var route domain.ModelRoute
+		err := row.Scan(&route.TenantID, &route.Label, &route.Chain, &route.CreatedAt)
+		return route, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if routes == nil {
+		routes = []domain.ModelRoute{}
+	}
+	return routes, nil
 }
 
 func (s *Store) RecordModelCallLog(ctx context.Context, log domain.ModelCallLog) error {
@@ -790,6 +898,27 @@ func scanRun(row pgx.Row) (domain.Run, error) {
 		run.TerminalReason = &reason
 	}
 	return run, nil
+}
+
+type spanInserter interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func insertSpans(ctx context.Context, db spanInserter, tenantID string, runID *string, stepIndex int, spans []domain.Span) error {
+	for _, span := range spans {
+		attributes := span.Attributes
+		if len(attributes) == 0 {
+			attributes = json.RawMessage("{}")
+		}
+		if _, err := db.Exec(ctx,
+			`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+			 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+			span.ID, tenantID, runID, stepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func modelChainJSON(chain []string) ([]byte, error) {

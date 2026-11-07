@@ -110,9 +110,10 @@ type ModelCallLog struct {
 }
 
 type ModelRoute struct {
-	TenantID string
-	Label    string
-	Chain    []string
+	TenantID  string
+	Label     string
+	Chain     []string
+	CreatedAt time.Time
 }
 
 const (
@@ -128,6 +129,17 @@ type ModelMessage struct {
 type ModelRequest struct {
 	Route    string
 	Messages []ModelMessage
+	Extra    map[string]json.RawMessage
+}
+
+type ModelAttempt struct {
+	Model     string
+	Status    string
+	Attempt   int
+	StartedAt time.Time
+	EndedAt   time.Time
+	LatencyMS int64
+	Error     string
 }
 
 type ModelResult struct {
@@ -141,6 +153,7 @@ type ModelResult struct {
 	OutputTokens   int
 	LatencyMS      int64
 	Status         string
+	Attempts       []ModelAttempt
 }
 
 type ModelGateway interface {

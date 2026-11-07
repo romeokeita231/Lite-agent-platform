@@ -89,6 +89,13 @@ func TestGracefulShutdownDrainsInflightRunAndRecovers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
+	if _, err := store.UpsertModelRoute(tenantCtx, domain.ModelRoute{
+		TenantID: tenantID,
+		Label:    "default",
+		Chain:    []string{"route:default"},
+	}); err != nil {
+		t.Fatalf("create model route: %v", err)
+	}
 	agent, err := store.CreateAgent(tenantCtx, domain.Agent{
 		ID:        ids.New(),
 		TenantID:  tenantID,
