@@ -46,6 +46,7 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway) *http
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
 	mux.Handle("POST /v1/runs/{id}/human-input", api.authenticated(http.HandlerFunc(api.submitHumanInput)))
+	mux.Handle("POST /v1/runs/{id}/cancel", api.authenticated(http.HandlerFunc(api.cancelRun)))
 	mux.Handle("POST /v1/tools", api.authenticated(http.HandlerFunc(api.createTool)))
 	mux.Handle("GET /v1/tools", api.authenticated(http.HandlerFunc(api.listTools)))
 	mux.Handle("POST /v1/tools/{tool_name}/invoke", api.authenticated(http.HandlerFunc(api.invokeTool)))
@@ -229,6 +230,23 @@ func (a *API) submitHumanInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (a *API) cancelRun(w http.ResponseWriter, r *http.Request) {
+	run, err := a.store.RequestCancel(r.Context(), r.PathValue("id"))
+	if errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "run not found")
+		return
+	}
+	if errors.Is(err, domain.ErrConflict) {
+		writeError(w, http.StatusConflict, "conflict", "run is already terminal")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "cancel run failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
