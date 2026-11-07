@@ -41,13 +41,15 @@ type decisionRequest struct {
 }
 
 type action struct {
-	Kind     string
-	Output   json.RawMessage
-	Route    string
-	Messages []domain.ModelMessage
-	Tool     string
-	Version  string
-	Args     json.RawMessage
+	Kind            string
+	Output          json.RawMessage
+	Route           string
+	Messages        []domain.ModelMessage
+	Tool            string
+	Version         string
+	Args            json.RawMessage
+	Prompt          string
+	DeadlineSeconds *float64
 }
 
 type stepFailure struct {
@@ -153,6 +155,8 @@ func parseAction(body []byte) (action, error) {
 		Tool     json.RawMessage `json:"tool"`
 		Version  json.RawMessage `json:"version"`
 		Args     json.RawMessage `json:"args"`
+		Prompt   json.RawMessage `json:"prompt"`
+		Deadline json.RawMessage `json:"deadline_seconds"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return invalid("invalid policy response JSON")
@@ -201,6 +205,20 @@ func parseAction(body []byte) (action, error) {
 			return invalid("tool_call args must be an object")
 		}
 		return action{Kind: kind, Tool: tool, Version: version, Args: raw.Args}, nil
+	case domain.StepHumanReview:
+		var prompt string
+		if len(raw.Prompt) == 0 || json.Unmarshal(raw.Prompt, &prompt) != nil || prompt == "" {
+			return invalid("human_review prompt must be a non-empty string")
+		}
+		var deadline *float64
+		if len(raw.Deadline) > 0 {
+			var seconds float64
+			if err := json.Unmarshal(raw.Deadline, &seconds); err != nil || seconds <= 0 {
+				return invalid("human_review deadline_seconds must be a positive number")
+			}
+			deadline = &seconds
+		}
+		return action{Kind: kind, Prompt: prompt, DeadlineSeconds: deadline}, nil
 	default:
 		return invalid("unsupported action " + kind)
 	}

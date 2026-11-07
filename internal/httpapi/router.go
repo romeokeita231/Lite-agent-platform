@@ -45,6 +45,7 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway) *http
 	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
+	mux.Handle("POST /v1/runs/{id}/human-input", api.authenticated(http.HandlerFunc(api.submitHumanInput)))
 	mux.Handle("POST /v1/tools", api.authenticated(http.HandlerFunc(api.createTool)))
 	mux.Handle("GET /v1/tools", api.authenticated(http.HandlerFunc(api.listTools)))
 	mux.Handle("POST /v1/tools/{tool_name}/invoke", api.authenticated(http.HandlerFunc(api.invokeTool)))
@@ -155,6 +156,79 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, run)
+}
+
+type humanInputRequest struct {
+	StepIndex int             `json:"step_index"`
+	Input     json.RawMessage `json:"input"`
+}
+
+func (a *API) submitHumanInput(w http.ResponseWriter, r *http.Request) {
+	var req humanInputRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	tenantID, err := repository.TenantOf(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "missing tenant in request context")
+		return
+	}
+	run, err := a.store.GetRun(r.Context(), r.PathValue("id"))
+	if errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "get run failed")
+		return
+	}
+	input := req.Input
+	if len(input) == 0 {
+		input = json.RawMessage("null")
+	}
+	result, err := json.Marshal(struct {
+		Input json.RawMessage `json:"input"`
+	}{Input: input})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "encode human input failed")
+		return
+	}
+	now := time.Now()
+	runID := run.ID
+	checkpoint := domain.Checkpoint{
+		RunID:     run.ID,
+		TenantID:  tenantID,
+		StepIndex: req.StepIndex,
+		StepType:  domain.StepHumanReview,
+		Result:    result,
+		CreatedAt: now,
+	}
+	span := domain.Span{
+		ID:         ids.New(),
+		TenantID:   tenantID,
+		RunID:      &runID,
+		StepIndex:  req.StepIndex,
+		Attempt:    run.Attempt,
+		Name:       "step.human_review",
+		StartedAt:  now,
+		EndedAt:    now,
+		Attributes: json.RawMessage(`{}`),
+	}
+	updated, err := a.store.SubmitHumanInput(r.Context(), checkpoint, span)
+	if errors.Is(err, domain.ErrConflict) {
+		writeError(w, http.StatusConflict, "conflict", "run is not waiting for this step")
+		return
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "submit human input failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (a *API) getRun(w http.ResponseWriter, r *http.Request) {

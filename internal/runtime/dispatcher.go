@@ -48,6 +48,9 @@ func (d *Dispatcher) Run(ctx context.Context) {
 }
 
 func (d *Dispatcher) tick(ctx context.Context) {
+	if err := d.store.FailExpiredHumanWaits(ctx); err != nil {
+		log.Printf("dispatcher: fail expired human waits: %v", err)
+	}
 	runs, err := d.store.ListRunnableRuns(ctx)
 	if err != nil {
 		log.Printf("dispatcher: list runnable runs: %v", err)
@@ -363,11 +366,39 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			stepIndex++
 			attempt = 0
 			continue
+		case domain.StepHumanReview:
+			pendingStep, err := json.Marshal(humanReviewStep{
+				Action:          string(domain.StepHumanReview),
+				Prompt:          act.Prompt,
+				DeadlineSeconds: act.DeadlineSeconds,
+			})
+			if err != nil {
+				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
+				return
+			}
+			deadline := time.Now().Add(d.opts.StepTimeout)
+			if act.DeadlineSeconds != nil {
+				deadline = time.Now().Add(time.Duration(*act.DeadlineSeconds * float64(time.Second)))
+			}
+			if err := d.store.EnterHumanReview(ctx, run.ID, attempt, pendingStep, act.Prompt, deadline); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("runtime: enter human review run %s: %v", run.ID, err)
+				d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+			}
+			return
 		default:
 			d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 			return
 		}
 	}
+}
+
+type humanReviewStep struct {
+	Action          string   `json:"action"`
+	Prompt          string   `json:"prompt"`
+	DeadlineSeconds *float64 `json:"deadline_seconds,omitempty"`
 }
 
 type toolCallResult struct {

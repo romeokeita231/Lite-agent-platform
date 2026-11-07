@@ -115,9 +115,14 @@ func (p *policyServer) count() int {
 }
 
 type env struct {
-	env  *testutil.Env
-	srv  *httptest.Server
-	keys map[string]string
+	env            *testutil.Env
+	srv            *httptest.Server
+	keys           map[string]string
+	store          *repository.Store
+	gateway        domain.ModelGateway
+	tools          domain.ToolGateway
+	options        agentruntime.Options
+	stopDispatcher func()
 }
 
 func newEnv(t *testing.T) *env {
@@ -134,11 +139,20 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 	t.Helper()
 	base := testutil.New(t)
 	store := repository.New(base.Pool)
+	tools := toolgw.New(store, stepTimeout)
 	e := &env{
 		env: base,
 		keys: map[string]string{
 			"tenant-a": "key-tenant-a-0123456789",
 			"tenant-b": "key-tenant-b-0123456789",
+		},
+		store:   store,
+		gateway: gateway,
+		tools:   tools,
+		options: agentruntime.Options{
+			StepTimeout:     stepTimeout,
+			MaxStepAttempts: maxAttempts,
+			PollInterval:    10 * time.Millisecond,
 		},
 	}
 	for tenantID, key := range e.keys {
@@ -152,25 +166,28 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, stepTimeout)))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools))
 	t.Cleanup(e.srv.Close)
 
+	e.startDispatcher(t)
+	return e
+}
+
+func (e *env) startDispatcher(t *testing.T) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	dispatcher := agentruntime.New(store, gateway, toolgw.New(store, stepTimeout), agentruntime.Options{
-		StepTimeout:     stepTimeout,
-		MaxStepAttempts: maxAttempts,
-		PollInterval:    10 * time.Millisecond,
-	})
+	dispatcher := agentruntime.New(e.store, e.gateway, e.tools, e.options)
 	done := make(chan struct{})
 	go func() {
 		dispatcher.Run(ctx)
 		close(done)
 	}()
-	t.Cleanup(func() {
+	stop := func() {
 		cancel()
 		<-done
-	})
-	return e
+	}
+	e.stopDispatcher = stop
+	t.Cleanup(stop)
 }
 
 func (e *env) do(t *testing.T, method, path, tenant string, body any) (int, []byte) {
@@ -350,6 +367,12 @@ func TestRunFailsOnInvalidPolicyAction(t *testing.T) {
 		{"unknown_action", `{"action":"bogus"}`},
 		{"missing_action", `{}`},
 		{"wrong_output_type", `{"action":"done","output":"nope"}`},
+		{"human_review_missing_prompt", `{"action":"human_review"}`},
+		{"human_review_empty_prompt", `{"action":"human_review","prompt":""}`},
+		{"human_review_non_string_prompt", `{"action":"human_review","prompt":7}`},
+		{"human_review_deadline_not_number", `{"action":"human_review","prompt":"approve?","deadline_seconds":"soon"}`},
+		{"human_review_deadline_zero", `{"action":"human_review","prompt":"approve?","deadline_seconds":0}`},
+		{"human_review_deadline_negative", `{"action":"human_review","prompt":"approve?","deadline_seconds":-5}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

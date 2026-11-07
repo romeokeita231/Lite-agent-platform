@@ -34,7 +34,8 @@ func TestDecideHandlerVerifiesSignatureAndWindow(t *testing.T) {
 	}
 
 	llmBody := []byte(`{"run_id":"r1","agent":"alpha","step_index":0,"attempt":0,"input":{},"ledger":{"recent":[],"summary":"","dropped":[]}}`)
-	doneBody := []byte(`{"run_id":"r1","agent":"alpha","step_index":1,"attempt":0,"input":{},"ledger":{"recent":[],"summary":"","dropped":[]}}`)
+	humanBody := []byte(`{"run_id":"r1","agent":"alpha","step_index":1,"attempt":0,"input":{},"ledger":{"recent":[],"summary":"","dropped":[]}}`)
+	doneBody := []byte(`{"run_id":"r1","agent":"alpha","step_index":2,"attempt":0,"input":{},"ledger":{"recent":[],"summary":"","dropped":[]}}`)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	status, raw := send(llmBody, now, sign(secret, http.MethodPost, "/internal/policy/decide", llmBody, now))
@@ -54,6 +55,22 @@ func TestDecideHandlerVerifiesSignatureAndWindow(t *testing.T) {
 	}
 	if len(llmReply.Messages) != 1 || llmReply.Messages[0].Role != "user" || llmReply.Messages[0].Content != "hello" {
 		t.Fatalf("llm messages = %+v", llmReply.Messages)
+	}
+
+	status, raw = send(humanBody, now, sign(secret, http.MethodPost, "/internal/policy/decide", humanBody, now))
+	if status != http.StatusOK {
+		t.Fatalf("human_review status = %d body=%s", status, raw)
+	}
+	var humanReply struct {
+		Action          string  `json:"action"`
+		Prompt          string  `json:"prompt"`
+		DeadlineSeconds float64 `json:"deadline_seconds"`
+	}
+	if err := json.Unmarshal([]byte(raw), &humanReply); err != nil {
+		t.Fatalf("decode human reply %s: %v", raw, err)
+	}
+	if humanReply.Action != "human_review" || humanReply.Prompt != "approve?" || humanReply.DeadlineSeconds <= 0 {
+		t.Fatalf("human reply = %+v", humanReply)
 	}
 
 	status, raw = send(doneBody, now, sign(secret, http.MethodPost, "/internal/policy/decide", doneBody, now))
