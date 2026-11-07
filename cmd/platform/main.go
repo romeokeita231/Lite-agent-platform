@@ -20,6 +20,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/config"
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
 	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
+	"github.com/romeokeita231/Lite-agent-platform/internal/modelgw"
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
@@ -82,7 +83,8 @@ func run() error {
 	go maint.loop(ctx, maintenanceInterval)
 
 	store := repository.New(pool)
-	dispatcher := agentruntime.New(store, agentruntime.Options{
+	gateway := modelgw.New(cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
+	dispatcher := agentruntime.New(store, gateway, agentruntime.Options{
 		StepTimeout:     cfg.StepTimeout,
 		MaxStepAttempts: cfg.MaxStepAttempts,
 		PollInterval:    cfg.PollInterval,

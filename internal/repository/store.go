@@ -358,6 +358,92 @@ func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoin
 	return tx.Commit(ctx)
 }
 
+func (s *Store) CompleteLLMCallStep(ctx context.Context, checkpoint domain.Checkpoint, span domain.Span, log domain.ModelCallLog) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if checkpoint.TenantID != tenantID || span.TenantID != tenantID || log.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	attributes := span.Attributes
+	if len(attributes) == 0 {
+		attributes = json.RawMessage("{}")
+	}
+	chain, err := modelChainJSON(log.Chain)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`insert into checkpoints (run_id, tenant_id, step_index, step_type, result, created_at)
+		 values ($1::uuid, $2, $3, $4, $5, $6)`,
+		checkpoint.RunID, tenantID, checkpoint.StepIndex, string(checkpoint.StepType), checkpoint.Result, checkpoint.CreatedAt,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into spans (id, tenant_id, run_id, step_index, attempt, name, started_at, ended_at, attributes, error)
+		 values ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
+		span.ID, tenantID, checkpoint.RunID, span.StepIndex, span.Attempt, span.Name, span.StartedAt, span.EndedAt, attributes, span.Error,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
+		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
+		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
+		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status,
+	); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx,
+		`update runs set attempt = 0, next_attempt_at = null, updated_at = now()
+		 where id::text = $1 and tenant_id = $2 and status = 'running'`,
+		checkpoint.RunID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ErrNotFound
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) RecordModelCallLog(ctx context.Context, log domain.ModelCallLog) error {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return err
+	}
+	if log.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	chain, err := modelChainJSON(log.Chain)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
+		`insert into model_call_logs (tenant_id, run_id, route_label, requested_model, chain,
+		                             effective_model, fallback_from, input_tokens, output_tokens, latency_ms, status)
+		 values ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		tenantID, log.RunID, log.RouteLabel, log.RequestedModel, chain,
+		log.EffectiveModel, log.FallbackFrom, log.InputTokens, log.OutputTokens, log.LatencyMS, log.Status)
+	return err
+}
+
+func modelChainJSON(chain []string) ([]byte, error) {
+	if chain == nil {
+		chain = []string{}
+	}
+	return json.Marshal(chain)
+}
+
 func uniqueToConflict(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {

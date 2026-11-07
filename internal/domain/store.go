@@ -21,4 +21,6 @@ type Store interface {
 	RescheduleStep(ctx context.Context, id string, attempt int, nextAttemptAt time.Time) error
 	MarkRunFailed(ctx context.Context, id string, reason TerminalReason) error
 	CompleteRunStep(ctx context.Context, checkpoint Checkpoint, span Span, output json.RawMessage) error
+	CompleteLLMCallStep(ctx context.Context, checkpoint Checkpoint, span Span, log ModelCallLog) error
+	RecordModelCallLog(ctx context.Context, log ModelCallLog) error
 }

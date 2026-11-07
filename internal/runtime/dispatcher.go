@@ -20,14 +20,15 @@ type Options struct {
 }
 
 type Dispatcher struct {
-	store  domain.Store
-	opts   Options
-	client *policyClient
-	wg     sync.WaitGroup
+	store   domain.Store
+	gateway domain.ModelGateway
+	opts    Options
+	client  *policyClient
+	wg      sync.WaitGroup
 }
 
-func New(store domain.Store, opts Options) *Dispatcher {
-	return &Dispatcher{store: store, opts: opts, client: newPolicyClient(opts.StepTimeout)}
+func New(store domain.Store, gateway domain.ModelGateway, opts Options) *Dispatcher {
+	return &Dispatcher{store: store, gateway: gateway, opts: opts, client: newPolicyClient(opts.StepTimeout)}
 }
 
 func (d *Dispatcher) Run(ctx context.Context) {
@@ -113,51 +114,172 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			continue
 		}
 
-		finished := time.Now()
-		result, err := json.Marshal(struct {
-			Output json.RawMessage `json:"output"`
-		}{Output: act.Output})
-		if err != nil {
+		switch domain.StepType(act.Kind) {
+		case domain.StepDone:
+			finished := time.Now()
+			result, err := json.Marshal(struct {
+				Output json.RawMessage `json:"output"`
+			}{Output: act.Output})
+			if err != nil {
+				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
+				return
+			}
+			runID := run.ID
+			checkpoint := domain.Checkpoint{
+				RunID:     run.ID,
+				TenantID:  run.TenantID,
+				StepIndex: stepIndex,
+				StepType:  domain.StepDone,
+				Result:    result,
+				CreatedAt: finished,
+			}
+			span := domain.Span{
+				ID:         ids.New(),
+				TenantID:   run.TenantID,
+				RunID:      &runID,
+				StepIndex:  stepIndex,
+				Attempt:    attempt,
+				Name:       "step.done",
+				StartedAt:  started,
+				EndedAt:    finished,
+				Attributes: json.RawMessage(`{}`),
+			}
+			if err := d.store.CompleteRunStep(ctx, checkpoint, span, act.Output); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				attempt++
+				if attempt >= d.opts.MaxStepAttempts {
+					log.Printf("runtime: complete run %s: %v", run.ID, err)
+					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					return
+				}
+				if !d.retryLater(ctx, run.ID, attempt) {
+					return
+				}
+				continue
+			}
+			return
+		case domain.StepLLMCall:
+			runID := run.ID
+			modelStart := time.Now()
+			modelResult, callErr := d.gateway.Generate(ctx, domain.ModelRequest{Route: act.Route, Messages: act.Messages})
+			finished := time.Now()
+			callLog := domain.ModelCallLog{
+				TenantID:       run.TenantID,
+				RunID:          &runID,
+				RouteLabel:     modelResult.RouteLabel,
+				RequestedModel: modelResult.RequestedModel,
+				Chain:          modelResult.Chain,
+				EffectiveModel: modelResult.Model,
+				FallbackFrom:   modelResult.FallbackFrom,
+				InputTokens:    modelResult.InputTokens,
+				OutputTokens:   modelResult.OutputTokens,
+				LatencyMS:      modelResult.LatencyMS,
+				Status:         modelResult.Status,
+			}
+			if callErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := d.store.RecordModelCallLog(ctx, callLog); err != nil {
+					log.Printf("runtime: record model call log for run %s: %v", run.ID, err)
+				}
+				attempt++
+				if attempt >= d.opts.MaxStepAttempts {
+					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					return
+				}
+				if !d.retryLater(ctx, run.ID, attempt) {
+					return
+				}
+				continue
+			}
+
+			var fallbackFrom *string
+			if modelResult.FallbackFrom != "" {
+				value := modelResult.FallbackFrom
+				fallbackFrom = &value
+			}
+			result, err := json.Marshal(llmCallResult{
+				Route:          act.Route,
+				RequestedModel: modelResult.RequestedModel,
+				Model:          modelResult.Model,
+				Chain:          modelResult.Chain,
+				FallbackFrom:   fallbackFrom,
+				Content:        modelResult.Content,
+				Usage: struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				}{InputTokens: modelResult.InputTokens, OutputTokens: modelResult.OutputTokens},
+			})
+			if err != nil {
+				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
+				return
+			}
+			attributes, _ := json.Marshal(map[string]any{
+				"requested_model": modelResult.RequestedModel,
+				"effective_model": modelResult.Model,
+				"status":          modelResult.Status,
+				"latency_ms":      modelResult.LatencyMS,
+				"attempt":         attempt,
+			})
+			checkpoint := domain.Checkpoint{
+				RunID:     run.ID,
+				TenantID:  run.TenantID,
+				StepIndex: stepIndex,
+				StepType:  domain.StepLLMCall,
+				Result:    result,
+				CreatedAt: finished,
+			}
+			span := domain.Span{
+				ID:         ids.New(),
+				TenantID:   run.TenantID,
+				RunID:      &runID,
+				StepIndex:  stepIndex,
+				Attempt:    attempt,
+				Name:       "model." + modelResult.Model,
+				StartedAt:  modelStart,
+				EndedAt:    finished,
+				Attributes: attributes,
+			}
+			if err := d.store.CompleteLLMCallStep(ctx, checkpoint, span, callLog); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				attempt++
+				if attempt >= d.opts.MaxStepAttempts {
+					log.Printf("runtime: complete llm_call run %s: %v", run.ID, err)
+					d.fail(ctx, run.ID, domain.ReasonMaxRetries)
+					return
+				}
+				if !d.retryLater(ctx, run.ID, attempt) {
+					return
+				}
+				continue
+			}
+			steps = append(steps, checkpoint)
+			stepIndex++
+			attempt = 0
+			continue
+		default:
 			d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 			return
 		}
-		runID := run.ID
-		checkpoint := domain.Checkpoint{
-			RunID:     run.ID,
-			TenantID:  run.TenantID,
-			StepIndex: stepIndex,
-			StepType:  domain.StepDone,
-			Result:    result,
-			CreatedAt: finished,
-		}
-		span := domain.Span{
-			ID:         ids.New(),
-			TenantID:   run.TenantID,
-			RunID:      &runID,
-			StepIndex:  stepIndex,
-			Attempt:    attempt,
-			Name:       "step.done",
-			StartedAt:  started,
-			EndedAt:    finished,
-			Attributes: json.RawMessage(`{}`),
-		}
-		if err := d.store.CompleteRunStep(ctx, checkpoint, span, act.Output); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			attempt++
-			if attempt >= d.opts.MaxStepAttempts {
-				log.Printf("runtime: complete run %s: %v", run.ID, err)
-				d.fail(ctx, run.ID, domain.ReasonMaxRetries)
-				return
-			}
-			if !d.retryLater(ctx, run.ID, attempt) {
-				return
-			}
-			continue
-		}
-		return
 	}
+}
+
+type llmCallResult struct {
+	Route          string   `json:"route"`
+	RequestedModel string   `json:"requested_model"`
+	Model          string   `json:"model"`
+	Chain          []string `json:"chain"`
+	FallbackFrom   *string  `json:"fallback_from"`
+	Content        string   `json:"content"`
+	Usage          struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 }
 
 func (d *Dispatcher) retryLater(ctx context.Context, runID string, attempt int) bool {

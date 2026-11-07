@@ -41,8 +41,10 @@ type decisionRequest struct {
 }
 
 type action struct {
-	Kind   string
-	Output json.RawMessage
+	Kind     string
+	Output   json.RawMessage
+	Route    string
+	Messages []domain.ModelMessage
 }
 
 type stepFailure struct {
@@ -135,8 +137,10 @@ func parseAction(body []byte) (action, error) {
 		return action{}, &stepFailure{reason: domain.ReasonPolicyInvalidAction, err: errors.New(message)}
 	}
 	var raw struct {
-		Action json.RawMessage `json:"action"`
-		Output json.RawMessage `json:"output"`
+		Action   json.RawMessage `json:"action"`
+		Output   json.RawMessage `json:"output"`
+		Route    json.RawMessage `json:"route"`
+		Messages json.RawMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return invalid("invalid policy response JSON")
@@ -145,18 +149,64 @@ func parseAction(body []byte) (action, error) {
 	if len(raw.Action) == 0 || json.Unmarshal(raw.Action, &kind) != nil || kind == "" {
 		return invalid("missing action")
 	}
-	if kind != string(domain.StepDone) {
+	switch domain.StepType(kind) {
+	case domain.StepDone:
+		output := raw.Output
+		if len(output) == 0 || string(output) == "null" {
+			output = json.RawMessage("{}")
+		}
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(output, &object); err != nil {
+			return invalid("done output must be an object")
+		}
+		return action{Kind: kind, Output: output}, nil
+	case domain.StepLLMCall:
+		var route string
+		if len(raw.Route) == 0 || json.Unmarshal(raw.Route, &route) != nil || route == "" {
+			return invalid("llm_call route must be a non-empty string")
+		}
+		messages, err := parseMessages(raw.Messages)
+		if err != nil {
+			return invalid(err.Error())
+		}
+		return action{Kind: kind, Route: route, Messages: messages}, nil
+	default:
 		return invalid("unsupported action " + kind)
 	}
-	output := raw.Output
-	if len(output) == 0 || string(output) == "null" {
-		output = json.RawMessage("{}")
+}
+
+func parseMessages(raw json.RawMessage) ([]domain.ModelMessage, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("llm_call messages are required")
 	}
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(output, &object); err != nil {
-		return invalid("done output must be an object")
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, errors.New("llm_call messages must be an array")
 	}
-	return action{Kind: kind, Output: output}, nil
+	if len(items) == 0 {
+		return nil, errors.New("llm_call messages must not be empty")
+	}
+	messages := make([]domain.ModelMessage, 0, len(items))
+	for _, item := range items {
+		roleRaw, ok := item["role"]
+		if !ok {
+			return nil, errors.New("llm_call message role is required")
+		}
+		var role string
+		if err := json.Unmarshal(roleRaw, &role); err != nil || role == "" {
+			return nil, errors.New("llm_call message role must be a non-empty string")
+		}
+		contentRaw, ok := item["content"]
+		if !ok {
+			return nil, errors.New("llm_call message content is required")
+		}
+		var content string
+		if err := json.Unmarshal(contentRaw, &content); err != nil {
+			return nil, errors.New("llm_call message content must be a string")
+		}
+		messages = append(messages, domain.ModelMessage{Role: role, Content: content})
+	}
+	return messages, nil
 }
 
 func sign(secret, method, path string, body []byte, timestamp string) string {

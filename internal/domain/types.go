@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
@@ -112,6 +113,38 @@ type ModelRoute struct {
 	TenantID string
 	Label    string
 	Chain    []string
+}
+
+const (
+	ModelStatusOK    = "ok"
+	ModelStatusError = "error"
+)
+
+type ModelMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ModelRequest struct {
+	Route    string
+	Messages []ModelMessage
+}
+
+type ModelResult struct {
+	RouteLabel     string
+	RequestedModel string
+	Model          string
+	Chain          []string
+	FallbackFrom   string
+	Content        string
+	InputTokens    int
+	OutputTokens   int
+	LatencyMS      int64
+	Status         string
+}
+
+type ModelGateway interface {
+	Generate(ctx context.Context, req ModelRequest) (ModelResult, error)
 }
 
 type Tool struct {

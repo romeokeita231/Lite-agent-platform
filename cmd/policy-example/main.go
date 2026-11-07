@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,11 @@ import (
 )
 
 const signatureWindow = 5 * time.Minute
+
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
 
 func main() {
 	addr := os.Getenv("POLICY_ADDR")
@@ -57,6 +63,38 @@ func decideHandler(secret string) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		var request struct {
+			StepIndex int             `json:"step_index"`
+			Input     json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if request.StepIndex == 0 {
+			model := os.Getenv("POLICY_MODEL")
+			if model == "" {
+				model = "route:default"
+			}
+			content := "hello"
+			var input struct {
+				Question string `json:"question"`
+			}
+			if len(request.Input) > 0 && json.Unmarshal(request.Input, &input) == nil && input.Question != "" {
+				content = input.Question
+			}
+			reply := struct {
+				Action   string    `json:"action"`
+				Route    string    `json:"route"`
+				Messages []message `json:"messages"`
+			}{
+				Action:   "llm_call",
+				Route:    model,
+				Messages: []message{{Role: "user", Content: content}},
+			}
+			_ = json.NewEncoder(w).Encode(reply)
+			return
+		}
 		_, _ = w.Write([]byte(`{"action":"done","output":{"answer":"done"}}`))
 	}
 }
