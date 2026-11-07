@@ -120,6 +120,12 @@ func (c *policyClient) decide(ctx context.Context, agent domain.Agent, req decis
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if ctx.Err() != nil {
+			return action{}, ctx.Err()
+		}
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return action{}, &stepFailure{reason: domain.ReasonMaxRetries, retryable: true, err: err}
+		}
 		return action{}, &stepFailure{reason: domain.ReasonPolicyUnreachable, retryable: true, err: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

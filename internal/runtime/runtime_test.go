@@ -99,6 +99,20 @@ func (p *policyServer) last(t *testing.T) policyRequest {
 	return p.requests[len(p.requests)-1]
 }
 
+func (p *policyServer) snapshot() []policyRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]policyRequest, len(p.requests))
+	copy(out, p.requests)
+	return out
+}
+
+func (p *policyServer) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.requests)
+}
+
 type env struct {
 	env  *testutil.Env
 	srv  *httptest.Server
@@ -111,6 +125,11 @@ func newEnv(t *testing.T) *env {
 }
 
 func newEnvWithGateway(t *testing.T, gateway domain.ModelGateway, maxAttempts int) *env {
+	t.Helper()
+	return newEnvWithOptions(t, gateway, maxAttempts, 2*time.Second)
+}
+
+func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts int, stepTimeout time.Duration) *env {
 	t.Helper()
 	base := testutil.New(t)
 	store := repository.New(base.Pool)
@@ -137,7 +156,7 @@ func newEnvWithGateway(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 
 	ctx, cancel := context.WithCancel(context.Background())
 	dispatcher := agentruntime.New(store, gateway, agentruntime.Options{
-		StepTimeout:     2 * time.Second,
+		StepTimeout:     stepTimeout,
 		MaxStepAttempts: maxAttempts,
 		PollInterval:    10 * time.Millisecond,
 	})
@@ -237,6 +256,29 @@ func (e *env) waitRun(t *testing.T, tenant, id string, want domain.RunStatus, ti
 	return last
 }
 
+func (e *env) watchRun(t *testing.T, tenant, id string, timeout time.Duration, observe func(domain.Run)) domain.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last domain.Run
+	for time.Now().Before(deadline) {
+		status, raw := e.do(t, http.MethodGet, "/v1/runs/"+id, tenant, nil)
+		if status != http.StatusOK {
+			t.Fatalf("get run %s status = %d body=%s", id, status, raw)
+		}
+		if err := json.Unmarshal(raw, &last); err != nil {
+			t.Fatalf("decode run: %v", err)
+		}
+		observe(last)
+		switch last.Status {
+		case domain.RunCompleted, domain.RunFailed, domain.RunCancelled:
+			return last
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("run %s did not reach a terminal state: %+v", id, last)
+	return last
+}
+
 type stepPayload struct {
 	StepIndex int             `json:"step_index"`
 	StepType  string          `json:"step_type"`
@@ -333,6 +375,9 @@ func TestRunFailsOnInvalidPolicyAction(t *testing.T) {
 			}
 			if len(steps) != 0 {
 				t.Fatalf("failed run steps = %+v", steps)
+			}
+			if got := policy.count(); got != 1 {
+				t.Fatalf("policy calls = %d, want 1", got)
 			}
 		})
 	}
@@ -631,6 +676,116 @@ func TestRunFailsOnInvalidLLMCallAction(t *testing.T) {
 				t.Fatalf("model call log count = %d, want 0", logCount)
 			}
 		})
+	}
+}
+
+func TestRunRetriesWithBackoffThenFailsPolicyUnreachable(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	unreachable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	policyURL := unreachable.URL
+	unreachable.Close()
+	e := newEnvWithOptions(t, modelgw.New("http://127.0.0.1:1/v1", "", time.Second), 3, time.Second)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policyURL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+
+	statuses := map[domain.RunStatus]bool{}
+	seen := map[int]bool{}
+	failed := e.watchRun(t, "tenant-a", run.ID, 10*time.Second, func(r domain.Run) {
+		statuses[r.Status] = true
+		if r.Attempt >= 1 && !seen[1] {
+			seen[1] = true
+			if r.NextAttemptAt == nil {
+				t.Fatalf("attempt 1 has no next_attempt_at: %+v", r)
+			}
+			if wait := time.Until(*r.NextAttemptAt); wait < 500*time.Millisecond || wait > 1200*time.Millisecond {
+				t.Fatalf("first backoff = %s, want about 1s", wait)
+			}
+		}
+		if r.Attempt >= 2 && !seen[2] {
+			seen[2] = true
+			if r.NextAttemptAt == nil {
+				t.Fatalf("attempt 2 has no next_attempt_at: %+v", r)
+			}
+			if wait := time.Until(*r.NextAttemptAt); wait < 1500*time.Millisecond || wait > 2300*time.Millisecond {
+				t.Fatalf("second backoff = %s, want about 2s", wait)
+			}
+		}
+	})
+	if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonPolicyUnreachable {
+		t.Fatalf("terminal reason = %v, want policy_unreachable", failed.TerminalReason)
+	}
+	if failed.EndedAt == nil {
+		t.Fatalf("failed run has no ended_at: %+v", failed)
+	}
+	if !statuses[domain.RunRunning] {
+		t.Fatalf("run never observed running: %v", statuses)
+	}
+	for status := range statuses {
+		if status != domain.RunQueued && status != domain.RunRunning && status != domain.RunFailed {
+			t.Fatalf("unexpected run status %q", status)
+		}
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("retry attempts not observed: %v", seen)
+	}
+}
+
+func TestDecisionTimeoutRetriesThenFailsMaxRetries(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	policy := newPolicyServerFunc(t, secret, func(policyRequest) string {
+		time.Sleep(400 * time.Millisecond)
+		return `{"action":"done"}`
+	})
+	e := newEnvWithOptions(t, modelgw.New("http://127.0.0.1:1/v1", "", time.Second), 2, 200*time.Millisecond)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+
+	statuses := map[domain.RunStatus]bool{}
+	failed := e.watchRun(t, "tenant-a", run.ID, 5*time.Second, func(r domain.Run) {
+		statuses[r.Status] = true
+	})
+	if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonMaxRetries {
+		t.Fatalf("terminal reason = %v, want max_retries", failed.TerminalReason)
+	}
+	for status := range statuses {
+		if status != domain.RunQueued && status != domain.RunRunning && status != domain.RunFailed {
+			t.Fatalf("unexpected run status %q", status)
+		}
+	}
+	if got := policy.count(); got != 2 {
+		t.Fatalf("policy calls = %d, want 2", got)
+	}
+}
+
+func TestAttemptResetsWhenNewStepBegins(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	upstream := newFakeUpstream(t, http.StatusOK)
+	policy := newPolicyServerFunc(t, secret, func(request policyRequest) string {
+		if request.StepIndex == 0 {
+			return `{"action":"llm_call","route":"route:default","messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"action":"done","output":{}}`
+	})
+	e := newEnvWithGateway(t, modelgw.New(upstream.baseURL(), "", 2*time.Second), 3)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+	e.waitRun(t, "tenant-a", run.ID, domain.RunCompleted, 10*time.Second)
+
+	requests := policy.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("policy requests = %d, want 2", len(requests))
+	}
+	if requests[0].StepIndex != 0 || requests[0].Attempt != 0 {
+		t.Fatalf("first policy request = %+v", requests[0])
+	}
+	if requests[1].StepIndex != 1 || requests[1].Attempt != 0 {
+		t.Fatalf("second policy request = %+v", requests[1])
 	}
 }
 
