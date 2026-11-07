@@ -28,8 +28,12 @@ type Store interface {
 	SubmitHumanInput(ctx context.Context, checkpoint Checkpoint, span Span) (Run, error)
 	FailExpiredHumanWaits(ctx context.Context) error
 	CompleteRunStep(ctx context.Context, checkpoint Checkpoint, span Span, output json.RawMessage) error
-	CompleteLLMCallStep(ctx context.Context, checkpoint Checkpoint, span Span, log ModelCallLog) error
+	CompleteLLMCallStep(ctx context.Context, checkpoint Checkpoint, spans []Span, log ModelCallLog) error
+	RecordModelCallAttempts(ctx context.Context, spans []Span, log ModelCallLog) error
 	RecordModelCallLog(ctx context.Context, log ModelCallLog) error
+	UpsertModelRoute(ctx context.Context, route ModelRoute) (ModelRoute, error)
+	GetModelRoute(ctx context.Context, label string) (ModelRoute, error)
+	ListModelRoutes(ctx context.Context) ([]ModelRoute, error)
 	CreateTool(ctx context.Context, tool Tool) (Tool, error)
 	ListTools(ctx context.Context) ([]Tool, error)
 	GetTool(ctx context.Context, toolName, version string) (Tool, error)

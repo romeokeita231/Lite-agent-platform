@@ -9,6 +9,7 @@ var (
 )
 
 var (
-	ErrToolNotFound = errors.New("tool not found")
-	ErrToolSchema   = errors.New("tool schema violation")
+	ErrToolNotFound       = errors.New("tool not found")
+	ErrToolSchema         = errors.New("tool schema violation")
+	ErrModelRouteNotFound = errors.New("model route not found")
 )

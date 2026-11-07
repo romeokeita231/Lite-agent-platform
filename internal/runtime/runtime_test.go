@@ -141,6 +141,18 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 	t.Helper()
 	base := testutil.New(t)
 	store := repository.New(base.Pool)
+	return newEnvFromStore(t, base, store, gateway, maxAttempts, stepTimeout)
+}
+
+func newEnvWithRoutes(t *testing.T, baseURL string, maxAttempts int, stepTimeout, budget time.Duration) *env {
+	t.Helper()
+	base := testutil.New(t)
+	store := repository.New(base.Pool)
+	return newEnvFromStore(t, base, store, modelgw.NewWithStore(store, baseURL, "", budget), maxAttempts, stepTimeout)
+}
+
+func newEnvFromStore(t *testing.T, base *testutil.Env, store *repository.Store, gateway domain.ModelGateway, maxAttempts int, stepTimeout time.Duration) *env {
+	t.Helper()
 	tools := toolgw.New(store, stepTimeout)
 	e := &env{
 		env: base,
@@ -168,7 +180,7 @@ func newEnvWithOptions(t *testing.T, gateway domain.ModelGateway, maxAttempts in
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}, gateway))
 	t.Cleanup(e.srv.Close)
 
 	e.startDispatcher(t)

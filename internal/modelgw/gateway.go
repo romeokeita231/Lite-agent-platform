@@ -15,6 +15,7 @@ import (
 )
 
 type Client struct {
+	store      domain.Store
 	baseURL    string
 	apiKey     string
 	budget     time.Duration
@@ -22,7 +23,12 @@ type Client struct {
 }
 
 func New(baseURL, apiKey string, budget time.Duration) *Client {
+	return NewWithStore(nil, baseURL, apiKey, budget)
+}
+
+func NewWithStore(store domain.Store, baseURL, apiKey string, budget time.Duration) *Client {
 	return &Client{
+		store:      store,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		budget:     budget,
@@ -31,38 +37,148 @@ func New(baseURL, apiKey string, budget time.Duration) *Client {
 }
 
 func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.ModelResult, error) {
-	model := req.Route
+	requested := req.Route
 	result := domain.ModelResult{
-		RouteLabel:     model,
-		RequestedModel: model,
-		Model:          model,
-		Chain:          []string{model},
+		RouteLabel:     requested,
+		RequestedModel: requested,
+		Status:         domain.ModelStatusError,
 	}
-	started := time.Now()
-	fail := func(err error) (domain.ModelResult, error) {
-		result.LatencyMS = time.Since(started).Milliseconds()
-		result.Status = domain.ModelStatusError
+	chain, err := c.resolveChain(ctx, requested)
+	if err != nil {
 		return result, err
 	}
-
-	if c.baseURL == "" {
-		return fail(errors.New("MODEL_BASE_URL is not configured"))
-	}
-	body, err := json.Marshal(struct {
-		Model    string                `json:"model"`
-		Messages []domain.ModelMessage `json:"messages"`
-	}{Model: model, Messages: req.Messages})
-	if err != nil {
-		return fail(err)
+	result.Chain = chain
+	if len(chain) == 0 {
+		return result, fmt.Errorf("%w: empty chain for %q", domain.ErrModelRouteNotFound, requested)
 	}
 
+	started := time.Now()
 	callCtx, cancel := context.WithTimeout(ctx, c.budget)
 	defer cancel()
+	deadline, _ := callCtx.Deadline()
 
-	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost,
+	var lastFailed string
+	var lastLatency time.Duration
+	var lastErr error
+	for index, model := range chain {
+		if index > 0 && time.Until(deadline) <= lastLatency {
+			break
+		}
+		if callCtx.Err() != nil {
+			break
+		}
+		attemptStarted := time.Now()
+		content, inputTokens, outputTokens, callErr := c.callModel(callCtx, model, req)
+		attemptEnded := time.Now()
+		attempt := domain.ModelAttempt{
+			Model:     model,
+			Attempt:   index + 1,
+			StartedAt: attemptStarted,
+			EndedAt:   attemptEnded,
+			LatencyMS: attemptEnded.Sub(attemptStarted).Milliseconds(),
+		}
+		if callErr == nil {
+			attempt.Status = domain.ModelStatusOK
+			result.Attempts = append(result.Attempts, attempt)
+			result.Model = model
+			result.FallbackFrom = lastFailed
+			result.Content = content
+			result.InputTokens = inputTokens
+			result.OutputTokens = outputTokens
+			result.LatencyMS = time.Since(started).Milliseconds()
+			result.Status = domain.ModelStatusOK
+			return result, nil
+		}
+		attempt.Status = domain.ModelStatusError
+		attempt.Error = callErr.Error()
+		result.Attempts = append(result.Attempts, attempt)
+		lastErr = callErr
+		lastFailed = model
+		lastLatency = attemptEnded.Sub(attemptStarted)
+		if !retryable(callErr) {
+			result.LatencyMS = time.Since(started).Milliseconds()
+			return result, callErr
+		}
+		if ctx.Err() != nil {
+			result.LatencyMS = time.Since(started).Milliseconds()
+			return result, ctx.Err()
+		}
+	}
+	result.LatencyMS = time.Since(started).Milliseconds()
+	if lastErr == nil {
+		lastErr = fmt.Errorf("%w: no attempt ran for %q", domain.ErrModelRouteNotFound, requested)
+	}
+	return result, lastErr
+}
+
+func (c *Client) resolveChain(ctx context.Context, requested string) ([]string, error) {
+	if !strings.HasPrefix(requested, "route:") {
+		return []string{requested}, nil
+	}
+	label := strings.TrimPrefix(requested, "route:")
+	if label == "" {
+		return nil, fmt.Errorf("%w: empty label", domain.ErrModelRouteNotFound)
+	}
+	if c.store == nil {
+		return []string{requested}, nil
+	}
+	route, err := c.store.GetModelRoute(ctx, label)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s", domain.ErrModelRouteNotFound, label)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return route.Chain, nil
+}
+
+type upstreamError struct {
+	err       error
+	retryable bool
+}
+
+func (e *upstreamError) Error() string { return e.err.Error() }
+
+func (e *upstreamError) Unwrap() error { return e.err }
+
+func retryable(err error) bool {
+	var upstream *upstreamError
+	if errors.As(err, &upstream) {
+		return upstream.retryable
+	}
+	return false
+}
+
+func (c *Client) callModel(ctx context.Context, model string, req domain.ModelRequest) (string, int, int, error) {
+	if c.baseURL == "" {
+		return "", 0, 0, &upstreamError{err: errors.New("MODEL_BASE_URL is not configured"), retryable: false}
+	}
+	payload := make(map[string]json.RawMessage, len(req.Extra)+2)
+	for key, value := range req.Extra {
+		if key == "stream" || key == "model" || key == "messages" {
+			continue
+		}
+		payload[key] = value
+	}
+	modelJSON, err := json.Marshal(model)
+	if err != nil {
+		return "", 0, 0, &upstreamError{err: err, retryable: false}
+	}
+	messagesJSON, err := json.Marshal(req.Messages)
+	if err != nil {
+		return "", 0, 0, &upstreamError{err: err, retryable: false}
+	}
+	payload["model"] = modelJSON
+	payload["messages"] = messagesJSON
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", 0, 0, &upstreamError{err: err, retryable: false}
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimSuffix(c.baseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return fail(err)
+		return "", 0, 0, &upstreamError{err: err, retryable: false}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -71,16 +187,20 @@ func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fail(err)
+		return "", 0, 0, &upstreamError{err: err, retryable: true}
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fail(err)
+		return "", 0, 0, &upstreamError{err: err, retryable: true}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fail(fmt.Errorf("model upstream returned status %d", resp.StatusCode))
+		statusErr := &upstreamError{
+			err:       fmt.Errorf("model upstream returned status %d", resp.StatusCode),
+			retryable: resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500,
+		}
+		return "", 0, 0, statusErr
 	}
 
 	var decoded struct {
@@ -95,22 +215,16 @@ func (c *Client) Generate(ctx context.Context, req domain.ModelRequest) (domain.
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &decoded); err != nil {
-		return fail(err)
+		return "", 0, 0, &upstreamError{err: err, retryable: false}
 	}
 	if len(decoded.Choices) == 0 {
-		return fail(errors.New("model upstream returned no choices"))
+		return "", 0, 0, &upstreamError{err: errors.New("model upstream returned no choices"), retryable: false}
 	}
 	var content string
 	if len(decoded.Choices[0].Message.Content) > 0 {
 		if err := json.Unmarshal(decoded.Choices[0].Message.Content, &content); err != nil {
-			return fail(err)
+			return "", 0, 0, &upstreamError{err: err, retryable: false}
 		}
 	}
-
-	result.Content = content
-	result.InputTokens = decoded.Usage.PromptTokens
-	result.OutputTokens = decoded.Usage.CompletionTokens
-	result.LatencyMS = time.Since(started).Milliseconds()
-	result.Status = domain.ModelStatusOK
-	return result, nil
+	return content, decoded.Usage.PromptTokens, decoded.Usage.CompletionTokens, nil
 }

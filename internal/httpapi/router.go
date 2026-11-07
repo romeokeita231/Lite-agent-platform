@@ -25,12 +25,16 @@ type Draining interface {
 type API struct {
 	store    domain.Store
 	tools    domain.ToolGateway
+	gateway  domain.ModelGateway
 	draining Draining
 }
 
-func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, draining Draining) *http.ServeMux {
+func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, draining Draining, gateways ...domain.ModelGateway) *http.ServeMux {
 	mux := http.NewServeMux()
 	api := &API{store: store, tools: tools, draining: draining}
+	if len(gateways) > 0 {
+		api.gateway = gateways[0]
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -55,6 +59,8 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, drain
 	mux.Handle("POST /v1/tools", api.authenticated(http.HandlerFunc(api.createTool)))
 	mux.Handle("GET /v1/tools", api.authenticated(http.HandlerFunc(api.listTools)))
 	mux.Handle("POST /v1/tools/{tool_name}/invoke", api.authenticated(http.HandlerFunc(api.invokeTool)))
+	mux.Handle("POST /v1/chat/completions", api.authenticated(http.HandlerFunc(api.chatCompletions)))
+	mux.Handle("GET /v1/models", api.authenticated(http.HandlerFunc(api.listModels)))
 	return mux
 }
 

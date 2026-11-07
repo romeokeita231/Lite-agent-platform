@@ -203,8 +203,14 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			return
 		case domain.StepLLMCall:
 			runID := run.ID
-			modelStart := time.Now()
 			modelResult, callErr := d.gateway.Generate(ctx, domain.ModelRequest{Route: act.Route, Messages: act.Messages})
+			if callErr != nil && errors.Is(callErr, domain.ErrModelRouteNotFound) {
+				if ctx.Err() != nil {
+					return
+				}
+				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
+				return
+			}
 			finished := time.Now()
 			callLog := domain.ModelCallLog{
 				TenantID:       run.TenantID,
@@ -219,12 +225,15 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				LatencyMS:      modelResult.LatencyMS,
 				Status:         modelResult.Status,
 			}
+			spans := modelAttemptSpans(run, act.Route, stepIndex, attempt, modelResult.Attempts)
 			if callErr != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				if err := d.store.RecordModelCallLog(ctx, callLog); err != nil {
-					log.Printf("runtime: record model call log for run %s: %v", run.ID, err)
+				if len(modelResult.Attempts) > 0 {
+					if err := d.store.RecordModelCallAttempts(ctx, spans, callLog); err != nil {
+						log.Printf("runtime: record model call attempts for run %s: %v", run.ID, err)
+					}
 				}
 				attempt++
 				if attempt >= d.opts.MaxStepAttempts {
@@ -258,13 +267,6 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				d.fail(ctx, run.ID, domain.ReasonPolicyInvalidAction)
 				return
 			}
-			attributes, _ := json.Marshal(map[string]any{
-				"requested_model": modelResult.RequestedModel,
-				"effective_model": modelResult.Model,
-				"status":          modelResult.Status,
-				"latency_ms":      modelResult.LatencyMS,
-				"attempt":         attempt,
-			})
 			checkpoint := domain.Checkpoint{
 				RunID:     run.ID,
 				TenantID:  run.TenantID,
@@ -273,18 +275,7 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 				Result:    result,
 				CreatedAt: finished,
 			}
-			span := domain.Span{
-				ID:         ids.New(),
-				TenantID:   run.TenantID,
-				RunID:      &runID,
-				StepIndex:  stepIndex,
-				Attempt:    attempt,
-				Name:       "model." + modelResult.Model,
-				StartedAt:  modelStart,
-				EndedAt:    finished,
-				Attributes: attributes,
-			}
-			if err := d.store.CompleteLLMCallStep(ctx, checkpoint, span, callLog); err != nil {
+			if err := d.store.CompleteLLMCallStep(ctx, checkpoint, spans, callLog); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -429,6 +420,33 @@ func (d *Dispatcher) drive(ctx context.Context, run domain.Run) {
 			return
 		}
 	}
+}
+
+func modelAttemptSpans(run domain.Run, requested string, stepIndex, attempt int, attempts []domain.ModelAttempt) []domain.Span {
+	runID := run.ID
+	spans := make([]domain.Span, 0, len(attempts))
+	for _, result := range attempts {
+		attributes, _ := json.Marshal(map[string]any{
+			"requested_model": requested,
+			"effective_model": result.Model,
+			"status":          result.Status,
+			"latency_ms":      result.LatencyMS,
+			"attempt":         result.Attempt,
+		})
+		spans = append(spans, domain.Span{
+			ID:         ids.New(),
+			TenantID:   run.TenantID,
+			RunID:      &runID,
+			StepIndex:  stepIndex,
+			Attempt:    attempt,
+			Name:       "model." + result.Model,
+			StartedAt:  result.StartedAt,
+			EndedAt:    result.EndedAt,
+			Attributes: attributes,
+			Error:      result.Error,
+		})
+	}
+	return spans
 }
 
 type humanReviewStep struct {

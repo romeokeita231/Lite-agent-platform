@@ -93,7 +93,7 @@ func run() error {
 	maint := &dbMaintenance{pool: pool, ready: ready, migrated: true}
 	go maint.loop(ctx, maintenanceInterval)
 
-	gateway := modelgw.New(cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
+	gateway := modelgw.NewWithStore(store, cfg.ModelBaseURL, cfg.ModelAPIKey, cfg.ModelChainBudget)
 	tools := toolgw.New(store, cfg.StepTimeout)
 	dispatcher := agentruntime.New(store, gateway, tools, agentruntime.Options{
 		StepTimeout:     cfg.StepTimeout,
@@ -102,7 +102,7 @@ func run() error {
 	})
 	go dispatcher.Run(ctx)
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready)}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, gateway)}
 
 	serveErr := make(chan error, 1)
 	go func() {
