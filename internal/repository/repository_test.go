@@ -464,6 +464,121 @@ func TestGetStepsOrderingAndTenantScope(t *testing.T) {
 	}
 }
 
+func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	ctxB := repository.WithTenant(context.Background(), "tenant-b")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.RescheduleStep(context.Background(), run.ID, 2, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("reschedule run: %v", err)
+	}
+
+	runID := run.ID
+	checkpoint := domain.Checkpoint{
+		RunID:     run.ID,
+		TenantID:  "tenant-a",
+		StepIndex: 0,
+		StepType:  domain.StepLLMCall,
+		Result:    json.RawMessage(`{"route":"route:default","content":"hi"}`),
+		CreatedAt: time.Now(),
+	}
+	span := domain.Span{
+		ID:         ids.New(),
+		TenantID:   "tenant-a",
+		RunID:      &runID,
+		StepIndex:  0,
+		Attempt:    1,
+		Name:       "model.route:default",
+		StartedAt:  time.Now(),
+		EndedAt:    time.Now(),
+		Attributes: json.RawMessage(`{"status":"ok"}`),
+	}
+	log := domain.ModelCallLog{
+		TenantID:       "tenant-a",
+		RunID:          &runID,
+		RouteLabel:     "route:default",
+		RequestedModel: "route:default",
+		Chain:          []string{"route:default"},
+		EffectiveModel: "route:default",
+		InputTokens:    10,
+		OutputTokens:   5,
+		LatencyMS:      7,
+		Status:         domain.ModelStatusOK,
+	}
+	if err := store.CompleteLLMCallStep(ctxA, checkpoint, span, log); err != nil {
+		t.Fatalf("complete llm call step: %v", err)
+	}
+
+	fetched, err := store.GetRun(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if fetched.Status != domain.RunRunning || fetched.Attempt != 0 || fetched.NextAttemptAt != nil || fetched.EndedAt != nil {
+		t.Fatalf("run after llm call = %+v", fetched)
+	}
+
+	steps, err := store.GetSteps(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if len(steps) != 1 || steps[0].StepIndex != 0 || steps[0].StepType != domain.StepLLMCall {
+		t.Fatalf("steps = %+v", steps)
+	}
+
+	var spanName string
+	if err := env.Pool.QueryRow(context.Background(),
+		`select name from spans where run_id::text = $1`, run.ID).Scan(&spanName); err != nil {
+		t.Fatalf("read span: %v", err)
+	}
+	if spanName != "model.route:default" {
+		t.Fatalf("span name = %q", spanName)
+	}
+
+	var chain []string
+	var inputTokens, outputTokens int
+	var logStatus string
+	if err := env.Pool.QueryRow(context.Background(),
+		`select chain, input_tokens, output_tokens, status from model_call_logs where run_id::text = $1`,
+		run.ID).Scan(&chain, &inputTokens, &outputTokens, &logStatus); err != nil {
+		t.Fatalf("read model call log: %v", err)
+	}
+	if len(chain) != 1 || chain[0] != "route:default" || inputTokens != 10 || outputTokens != 5 || logStatus != domain.ModelStatusOK {
+		t.Fatalf("model call log = chain %v tokens %d/%d status %q", chain, inputTokens, outputTokens, logStatus)
+	}
+
+	if err := store.CompleteLLMCallStep(ctxB, checkpoint, span, log); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant complete error = %v, want ErrNotFound", err)
+	}
+	if err := store.CompleteLLMCallStep(context.Background(), checkpoint, span, log); !errors.Is(err, domain.ErrNoTenant) {
+		t.Fatalf("complete without tenant error = %v, want ErrNoTenant", err)
+	}
+	if err := store.RecordModelCallLog(ctxB, log); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-tenant record error = %v, want ErrNotFound", err)
+	}
+	if err := store.RecordModelCallLog(context.Background(), log); !errors.Is(err, domain.ErrNoTenant) {
+		t.Fatalf("record without tenant error = %v, want ErrNoTenant", err)
+	}
+	failureLog := log
+	failureLog.InputTokens = 0
+	failureLog.OutputTokens = 0
+	failureLog.Status = domain.ModelStatusError
+	if err := store.RecordModelCallLog(ctxA, failureLog); err != nil {
+		t.Fatalf("record failure log: %v", err)
+	}
+	var logCount int
+	if err := env.Pool.QueryRow(context.Background(),
+		`select count(*) from model_call_logs where run_id::text = $1`, run.ID).Scan(&logCount); err != nil {
+		t.Fatalf("count model call logs: %v", err)
+	}
+	if logCount != 2 {
+		t.Fatalf("model call log count = %d, want 2", logCount)
+	}
+}
+
 func createTestRun(t *testing.T, store *repository.Store, ctx context.Context, tenantID, agentID string) domain.Run {
 	t.Helper()
 	run, err := store.CreateRun(ctx, domain.Run{

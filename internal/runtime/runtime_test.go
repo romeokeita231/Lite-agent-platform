@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/romeokeita231/Lite-agent-platform/internal/domain"
 	"github.com/romeokeita231/Lite-agent-platform/internal/httpapi"
+	"github.com/romeokeita231/Lite-agent-platform/internal/modelgw"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
 	"github.com/romeokeita231/Lite-agent-platform/internal/testutil"
@@ -50,7 +52,14 @@ type policyServer struct {
 	requests []policyRequest
 }
 
+type policyResponder func(policyRequest) string
+
 func newPolicyServer(t *testing.T, secret, response string) *policyServer {
+	t.Helper()
+	return newPolicyServerFunc(t, secret, func(policyRequest) string { return response })
+}
+
+func newPolicyServerFunc(t *testing.T, secret string, respond policyResponder) *policyServer {
 	t.Helper()
 	p := &policyServer{}
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +83,7 @@ func newPolicyServer(t *testing.T, secret, response string) *policyServer {
 		p.requests = append(p.requests, request)
 		p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(response))
+		_, _ = w.Write([]byte(respond(request)))
 	}))
 	t.Cleanup(p.srv.Close)
 	return p
@@ -97,6 +106,11 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvWithGateway(t, modelgw.New("http://127.0.0.1:1/v1", "", 2*time.Second), 3)
+}
+
+func newEnvWithGateway(t *testing.T, gateway domain.ModelGateway, maxAttempts int) *env {
 	t.Helper()
 	base := testutil.New(t)
 	store := repository.New(base.Pool)
@@ -122,9 +136,9 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(e.srv.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	dispatcher := agentruntime.New(store, agentruntime.Options{
+	dispatcher := agentruntime.New(store, gateway, agentruntime.Options{
 		StepTimeout:     2 * time.Second,
-		MaxStepAttempts: 3,
+		MaxStepAttempts: maxAttempts,
 		PollInterval:    10 * time.Millisecond,
 	})
 	done := make(chan struct{})
@@ -319,6 +333,302 @@ func TestRunFailsOnInvalidPolicyAction(t *testing.T) {
 			}
 			if len(steps) != 0 {
 				t.Fatalf("failed run steps = %+v", steps)
+			}
+		})
+	}
+}
+
+type upstreamCall struct {
+	Path     string
+	Model    string                `json:"model"`
+	Messages []domain.ModelMessage `json:"messages"`
+}
+
+type fakeUpstream struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	calls  []upstreamCall
+	status int
+}
+
+func newFakeUpstream(t *testing.T, status int) *fakeUpstream {
+	t.Helper()
+	f := &fakeUpstream{status: status}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		var call upstreamCall
+		if err := json.Unmarshal(body, &call); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		call.Path = r.URL.Path
+		f.mu.Lock()
+		f.calls = append(f.calls, call)
+		f.mu.Unlock()
+		if f.status < 200 || f.status >= 300 {
+			http.Error(w, "upstream failure", f.status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"42"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeUpstream) baseURL() string {
+	return f.srv.URL + "/v1"
+}
+
+func (f *fakeUpstream) received() []upstreamCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]upstreamCall, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+type llmResultPayload struct {
+	Route          string   `json:"route"`
+	RequestedModel string   `json:"requested_model"`
+	Model          string   `json:"model"`
+	Chain          []string `json:"chain"`
+	FallbackFrom   *string  `json:"fallback_from"`
+	Content        string   `json:"content"`
+	Usage          struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+func TestRunCompletesThroughLLMCall(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	upstream := newFakeUpstream(t, http.StatusOK)
+	policy := newPolicyServerFunc(t, secret, func(request policyRequest) string {
+		if request.StepIndex == 0 {
+			return `{"action":"llm_call","route":"route:default","messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"action":"done","output":{"answer":"done"}}`
+	})
+	e := newEnvWithGateway(t, modelgw.New(upstream.baseURL(), "", 2*time.Second), 3)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+
+	completed := e.waitRun(t, "tenant-a", run.ID, domain.RunCompleted, 10*time.Second)
+	if string(completed.Output) != `{"answer":"done"}` {
+		t.Fatalf("completed run output = %s", completed.Output)
+	}
+
+	status, raw := e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("get steps status = %d body=%s", status, raw)
+	}
+	var steps []stepPayload
+	if err := json.Unmarshal(raw, &steps); err != nil {
+		t.Fatalf("decode steps %s: %v", raw, err)
+	}
+	if len(steps) != 2 || steps[0].StepIndex != 0 || steps[0].StepType != "llm_call" ||
+		steps[1].StepIndex != 1 || steps[1].StepType != "done" {
+		t.Fatalf("steps = %+v", steps)
+	}
+	var llm llmResultPayload
+	if err := json.Unmarshal(steps[0].Result, &llm); err != nil {
+		t.Fatalf("decode llm result %s: %v", steps[0].Result, err)
+	}
+	if llm.Route != "route:default" || llm.RequestedModel != "route:default" || llm.Model != "route:default" {
+		t.Fatalf("llm result models = %+v", llm)
+	}
+	if len(llm.Chain) != 1 || llm.Chain[0] != "route:default" {
+		t.Fatalf("llm chain = %+v", llm.Chain)
+	}
+	if llm.FallbackFrom != nil {
+		t.Fatalf("llm fallback_from = %v", *llm.FallbackFrom)
+	}
+	if llm.Content != "42" || llm.Usage.InputTokens != 10 || llm.Usage.OutputTokens != 5 {
+		t.Fatalf("llm content/usage = %+v", llm)
+	}
+
+	second := policy.last(t)
+	if second.StepIndex != 1 || len(second.Ledger.Recent) != 1 || second.Ledger.Recent[0].StepType != "llm_call" {
+		t.Fatalf("second policy request = %+v", second)
+	}
+
+	calls := upstream.received()
+	if len(calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", len(calls))
+	}
+	if calls[0].Path != "/v1/chat/completions" || calls[0].Model != "route:default" {
+		t.Fatalf("upstream call = %+v", calls[0])
+	}
+	if len(calls[0].Messages) != 1 || calls[0].Messages[0].Role != "user" || calls[0].Messages[0].Content != "hi" {
+		t.Fatalf("upstream messages = %+v", calls[0].Messages)
+	}
+
+	var spanCount int
+	if err := e.env.Pool.QueryRow(context.Background(),
+		`select count(*) from spans where run_id::text = $1`, run.ID).Scan(&spanCount); err != nil {
+		t.Fatalf("count spans: %v", err)
+	}
+	if spanCount != 2 {
+		t.Fatalf("span count = %d, want 2", spanCount)
+	}
+	var spanName string
+	var attributes json.RawMessage
+	if err := e.env.Pool.QueryRow(context.Background(),
+		`select name, attributes from spans where run_id::text = $1 and step_index = 0`, run.ID).Scan(&spanName, &attributes); err != nil {
+		t.Fatalf("read llm span: %v", err)
+	}
+	if spanName != "model.route:default" {
+		t.Fatalf("llm span name = %q", spanName)
+	}
+	var attrs map[string]any
+	if err := json.Unmarshal(attributes, &attrs); err != nil {
+		t.Fatalf("decode span attributes %s: %v", attributes, err)
+	}
+	for _, key := range []string{"requested_model", "effective_model", "status", "latency_ms", "attempt"} {
+		if _, ok := attrs[key]; !ok {
+			t.Fatalf("span attributes missing %q: %s", key, attributes)
+		}
+	}
+
+	var logCount int
+	if err := e.env.Pool.QueryRow(context.Background(),
+		`select count(*) from model_call_logs where run_id::text = $1`, run.ID).Scan(&logCount); err != nil {
+		t.Fatalf("count model call logs: %v", err)
+	}
+	if logCount != 1 {
+		t.Fatalf("model call log count = %d, want 1", logCount)
+	}
+	var routeLabel, requested, effective, callStatus string
+	var inputTokens, outputTokens int
+	var latencyMS int64
+	if err := e.env.Pool.QueryRow(context.Background(),
+		`select route_label, requested_model, effective_model, input_tokens, output_tokens, latency_ms, status
+		 from model_call_logs where run_id::text = $1`, run.ID,
+	).Scan(&routeLabel, &requested, &effective, &inputTokens, &outputTokens, &latencyMS, &callStatus); err != nil {
+		t.Fatalf("read model call log: %v", err)
+	}
+	if routeLabel != "route:default" || requested != "route:default" || effective != "route:default" {
+		t.Fatalf("model call log models = %q/%q/%q", routeLabel, requested, effective)
+	}
+	if inputTokens != 10 || outputTokens != 5 || latencyMS < 0 || callStatus != domain.ModelStatusOK {
+		t.Fatalf("model call log = tokens %d/%d latency %d status %q", inputTokens, outputTokens, latencyMS, callStatus)
+	}
+}
+
+func TestRunFailsWhenUpstreamReturns5xx(t *testing.T) {
+	const secret = "runtime-secret"
+	t.Setenv("POLICY_SECRET_ALPHA", secret)
+	upstream := newFakeUpstream(t, http.StatusInternalServerError)
+	policy := newPolicyServer(t, secret,
+		`{"action":"llm_call","route":"route:default","messages":[{"role":"user","content":"hi"}]}`)
+	e := newEnvWithGateway(t, modelgw.New(upstream.baseURL(), "", 2*time.Second), 2)
+
+	agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+	run := e.submitRun(t, "tenant-a", agent.ID)
+
+	failed := e.waitRun(t, "tenant-a", run.ID, domain.RunFailed, 15*time.Second)
+	if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonMaxRetries {
+		t.Fatalf("terminal reason = %v, want max_retries", failed.TerminalReason)
+	}
+
+	status, raw := e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("get steps status = %d body=%s", status, raw)
+	}
+	var steps []stepPayload
+	if err := json.Unmarshal(raw, &steps); err != nil {
+		t.Fatalf("decode steps %s: %v", raw, err)
+	}
+	if len(steps) != 0 {
+		t.Fatalf("failed run steps = %+v", steps)
+	}
+
+	if calls := upstream.received(); len(calls) != 2 {
+		t.Fatalf("upstream calls = %d, want 2", len(calls))
+	}
+
+	rows, err := e.env.Pool.Query(context.Background(),
+		`select requested_model, input_tokens, output_tokens, latency_ms, status
+		 from model_call_logs where run_id::text = $1 order by created_at`, run.ID)
+	if err != nil {
+		t.Fatalf("query model call logs: %v", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var requested, callStatus string
+		var inputTokens, outputTokens int
+		var latencyMS int64
+		if err := rows.Scan(&requested, &inputTokens, &outputTokens, &latencyMS, &callStatus); err != nil {
+			t.Fatalf("scan model call log: %v", err)
+		}
+		count++
+		if requested != "route:default" || inputTokens != 0 || outputTokens != 0 || latencyMS < 0 || callStatus != domain.ModelStatusError {
+			t.Fatalf("failed model call log = %q %d/%d %d %q", requested, inputTokens, outputTokens, latencyMS, callStatus)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate model call logs: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("failed model call log count = %d, want 2", count)
+	}
+}
+
+func TestRunFailsOnInvalidLLMCallAction(t *testing.T) {
+	cases := []struct {
+		name     string
+		response string
+	}{
+		{"missing_route", `{"action":"llm_call","messages":[{"role":"user","content":"hi"}]}`},
+		{"empty_messages", `{"action":"llm_call","route":"route:default","messages":[]}`},
+		{"messages_not_array", `{"action":"llm_call","route":"route:default","messages":"hi"}`},
+		{"message_missing_content", `{"action":"llm_call","route":"route:default","messages":[{"role":"user"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const secret = "runtime-secret"
+			t.Setenv("POLICY_SECRET_ALPHA", secret)
+			upstream := newFakeUpstream(t, http.StatusOK)
+			policy := newPolicyServer(t, secret, tc.response)
+			e := newEnvWithGateway(t, modelgw.New(upstream.baseURL(), "", 2*time.Second), 3)
+
+			agent := e.createAgent(t, "tenant-a", "alpha", policy.srv.URL, "POLICY_SECRET_ALPHA")
+			run := e.submitRun(t, "tenant-a", agent.ID)
+
+			failed := e.waitRun(t, "tenant-a", run.ID, domain.RunFailed, 5*time.Second)
+			if failed.TerminalReason == nil || *failed.TerminalReason != domain.ReasonPolicyInvalidAction {
+				t.Fatalf("terminal reason = %v, want policy_invalid_action", failed.TerminalReason)
+			}
+
+			status, raw := e.do(t, http.MethodGet, "/v1/runs/"+run.ID+"/steps", "tenant-a", nil)
+			if status != http.StatusOK {
+				t.Fatalf("get steps status = %d body=%s", status, raw)
+			}
+			var steps []stepPayload
+			if err := json.Unmarshal(raw, &steps); err != nil {
+				t.Fatalf("decode steps %s: %v", raw, err)
+			}
+			if len(steps) != 0 {
+				t.Fatalf("failed run steps = %+v", steps)
+			}
+			if calls := upstream.received(); len(calls) != 0 {
+				t.Fatalf("upstream calls = %d, want 0", len(calls))
+			}
+			var logCount int
+			if err := e.env.Pool.QueryRow(context.Background(),
+				`select count(*) from model_call_logs where run_id::text = $1`, run.ID).Scan(&logCount); err != nil {
+				t.Fatalf("count model call logs: %v", err)
+			}
+			if logCount != 0 {
+				t.Fatalf("model call log count = %d, want 0", logCount)
 			}
 		})
 	}
