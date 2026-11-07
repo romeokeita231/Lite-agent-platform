@@ -257,7 +257,7 @@ func (s *Store) RescheduleStep(ctx context.Context, id string, attempt int, next
 func (s *Store) MarkRunFailed(ctx context.Context, id string, reason domain.TerminalReason) error {
 	tag, err := s.pool.Exec(ctx,
 		`update runs set status = 'failed', terminal_reason = $2, ended_at = now(), updated_at = now()
-		 where id::text = $1 and status = 'running'`,
+		 where id::text = $1 and status in ('queued', 'running')`,
 		id, string(reason))
 	if err != nil {
 		return err
@@ -347,7 +347,7 @@ func (s *Store) CompleteRunStep(ctx context.Context, checkpoint domain.Checkpoin
 	tag, err := tx.Exec(ctx,
 		`update runs set status = 'completed', output = $2, attempt = 0, next_attempt_at = null,
 		        terminal_reason = null, ended_at = now(), updated_at = now()
-		 where id::text = $1 and tenant_id = $3 and status = 'running'`,
+		 where id::text = $1 and tenant_id = $3 and status in ('queued', 'running')`,
 		runID, output, tenantID)
 	if err != nil {
 		return err

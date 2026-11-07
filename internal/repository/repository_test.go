@@ -579,6 +579,44 @@ func TestCompleteLLMCallStepWritesArtifactsAndResetsAttempt(t *testing.T) {
 	}
 }
 
+func TestMarkRunFailedIsIdempotent(t *testing.T) {
+	env := testutil.New(t)
+	store := repository.New(env.Pool)
+	ctxA := repository.WithTenant(context.Background(), "tenant-a")
+	run := createTestRun(t, store, ctxA, "tenant-a", "agent-a")
+	if _, err := store.ClaimRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("claim run: %v", err)
+	}
+	if err := store.MarkRunFailed(context.Background(), run.ID, domain.ReasonPolicyUnreachable); err != nil {
+		t.Fatalf("mark run failed: %v", err)
+	}
+	first, err := store.GetRun(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get failed run: %v", err)
+	}
+	if first.Status != domain.RunFailed || first.TerminalReason == nil ||
+		*first.TerminalReason != domain.ReasonPolicyUnreachable || first.EndedAt == nil {
+		t.Fatalf("failed run = %+v", first)
+	}
+
+	if err := store.MarkRunFailed(context.Background(), run.ID, domain.ReasonMaxRetries); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("second mark run failed error = %v, want ErrNotFound", err)
+	}
+	second, err := store.GetRun(ctxA, run.ID)
+	if err != nil {
+		t.Fatalf("get run after duplicate failure: %v", err)
+	}
+	if second.Status != first.Status || second.Attempt != first.Attempt ||
+		second.TerminalReason == nil || *second.TerminalReason != *first.TerminalReason ||
+		!second.UpdatedAt.Equal(first.UpdatedAt) || second.EndedAt == nil ||
+		!second.EndedAt.Equal(*first.EndedAt) || second.NextAttemptAt != nil {
+		t.Fatalf("run changed after duplicate failure: first=%+v second=%+v", first, second)
+	}
+	if string(second.Output) != string(first.Output) || string(second.Input) != string(first.Input) {
+		t.Fatalf("run payload changed after duplicate failure: first=%+v second=%+v", first, second)
+	}
+}
+
 func createTestRun(t *testing.T, store *repository.Store, ctx context.Context, tenantID, agentID string) domain.Run {
 	t.Helper()
 	run, err := store.CreateRun(ctx, domain.Run{
