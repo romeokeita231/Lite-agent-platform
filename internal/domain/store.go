@@ -31,6 +31,7 @@ type Store interface {
 	CompleteLLMCallStep(ctx context.Context, checkpoint Checkpoint, spans []Span, log ModelCallLog) error
 	RecordModelCallAttempts(ctx context.Context, spans []Span, log ModelCallLog) error
 	RecordModelCallLog(ctx context.Context, log ModelCallLog) error
+	ModelUsage(ctx context.Context, groupBy string, from, to *time.Time) ([]UsageGroup, error)
 	UpsertModelRoute(ctx context.Context, route ModelRoute) (ModelRoute, error)
 	GetModelRoute(ctx context.Context, label string) (ModelRoute, error)
 	ListModelRoutes(ctx context.Context) ([]ModelRoute, error)

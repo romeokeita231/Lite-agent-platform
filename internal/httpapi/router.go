@@ -61,6 +61,7 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, drain
 	mux.Handle("POST /v1/tools/{tool_name}/invoke", api.authenticated(http.HandlerFunc(api.invokeTool)))
 	mux.Handle("POST /v1/chat/completions", api.authenticated(http.HandlerFunc(api.chatCompletions)))
 	mux.Handle("GET /v1/models", api.authenticated(http.HandlerFunc(api.listModels)))
+	mux.Handle("GET /v1/tenants/{id}/usage", api.authenticated(http.HandlerFunc(api.tenantUsage)))
 	return mux
 }
 

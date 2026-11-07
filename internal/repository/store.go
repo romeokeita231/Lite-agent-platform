@@ -734,6 +734,63 @@ func (s *Store) RecordModelCallLog(ctx context.Context, log domain.ModelCallLog)
 	return err
 }
 
+func (s *Store) ModelUsage(ctx context.Context, groupBy string, from, to *time.Time) ([]domain.UsageGroup, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if groupBy == domain.UsageGroupByRun {
+		rows, err := s.pool.Query(ctx,
+			`select run_id::text, count(*), coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0)
+			 from model_call_logs
+			 where tenant_id = $1
+			   and ($2::timestamptz is null or created_at >= $2::timestamptz)
+			   and ($3::timestamptz is null or created_at <= $3::timestamptz)
+			 group by run_id
+			 order by run_id nulls first`,
+			tenantID, from, to)
+		if err != nil {
+			return nil, err
+		}
+		groups, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.UsageGroup, error) {
+			var group domain.UsageGroup
+			err := row.Scan(&group.RunID, &group.Calls, &group.InputTokens, &group.OutputTokens)
+			return group, err
+		})
+		if err != nil {
+			return nil, err
+		}
+		if groups == nil {
+			groups = []domain.UsageGroup{}
+		}
+		return groups, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`select effective_model, count(*), coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0)
+		 from model_call_logs
+		 where tenant_id = $1
+		   and ($2::timestamptz is null or created_at >= $2::timestamptz)
+		   and ($3::timestamptz is null or created_at <= $3::timestamptz)
+		 group by effective_model
+		 order by effective_model`,
+		tenantID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.UsageGroup, error) {
+		var group domain.UsageGroup
+		err := row.Scan(&group.Model, &group.Calls, &group.InputTokens, &group.OutputTokens)
+		return group, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if groups == nil {
+		groups = []domain.UsageGroup{}
+	}
+	return groups, nil
+}
+
 func (s *Store) CreateTool(ctx context.Context, tool domain.Tool) (domain.Tool, error) {
 	tenantID, err := TenantOf(ctx)
 	if err != nil {
