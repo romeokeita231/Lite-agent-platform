@@ -18,13 +18,13 @@ This repo is **single-context**:
 /
 ├── GLOSSARY.md
 ├── README.md
-├── docs/adr/          ← ADRs 0001–0022, the spec of the runtime
-├── cmd/               ← (planned) the platform and policy binaries
-└── internal/          ← (planned) ledger, model gateway, tools, policy client
+├── docs/adr/          ← ADRs 0001–0025, the spec of the runtime
+├── cmd/               ← the platform and policy binaries
+└── internal/          ← ledger, model gateway, tools, policy client
 ```
 
-There is no code yet. The ADRs are the full extent of the design, so they carry more weight
-here than in a repo where the code is the source of truth.
+The implementation lives in `cmd/` and `internal/`. The ADRs remain the spec, so they carry
+more weight here than in a repo where the code is the source of truth.
 
 ## This repo's ADR conventions
 

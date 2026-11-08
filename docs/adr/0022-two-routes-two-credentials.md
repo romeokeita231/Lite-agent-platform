@@ -2,7 +2,7 @@
 
 Status: accepted
 
-`/v1` 只认租户 API Key，`/internal` 只认平台对 Policy 的 HMAC（ADR 0015），两者互不接受对方的凭证。对外清单：Run 的创建/查询/账本/人工输入/取消，模型网关与模型列表，工具列表/调用/注册，Agent 定义，Trace 查询，评测提交与报告，租户用量。
+`/v1` 只认租户 API Key，`/internal` 只认平台对 Policy 的 HMAC（ADR 0015），两者互不接受对方的凭证。`/internal/policy/decide` 属于 **Policy 进程**的路由，不是平台进程的路由：平台只暴露 `/v1`、`/healthz`、`/readyz`、`/metrics`。对外清单：Run 的创建/查询/账本/人工输入/取消，模型网关与模型列表，工具列表/调用/注册，Agent 定义，Trace 查询，评测提交与报告，租户用量。
 
 ## Consequences
 
