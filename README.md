@@ -301,6 +301,11 @@ Model fallback happens only on retryable errors: 429, 5xx, timeouts, and connect
 - **Single writer**: there is no lease or heartbeat table, and `ResetRunningRuns` takes over every `running` run. Run one replica at a time; the Kubernetes manifest uses `replicas: 1`, `maxSurge: 0`, `maxUnavailable: 1`.
 - **Graceful shutdown**: on SIGTERM/interrupt, `/readyz` flips to `503` and new runs are refused; the dispatcher stops picking up runs and gives in-flight steps up to `STEP_TIMEOUT + 5s`; `ResetRunningRuns` then returns unfinished runs to `queued`; HTTP closes last. The Kubernetes manifest's `terminationGracePeriodSeconds: 30` covers this sequence.
 - **Metrics**: `/metrics` exposes run status, step retries, model fallbacks and latency, tool calls, context tokens, and per-tenant inflight counts. Metrics are not the ledger and are lost on restart ([ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)).
+- **Watching a running stack**: there is no dashboard UI, by design — every interaction is API or CLI. `scripts/status.ps1` prints one snapshot: container state, `/healthz` and `/readyz`, runs by status, anything still in flight (`queued`/`running`/`waiting_human`), the last five runs, and Checkpoint/Span counts read from the ledger itself.
+
+  ```powershell
+  powershell -File scripts/status.ps1
+  ```
 - **Deployment**: manifests live in [`k8s/`](k8s/), with notes in [`k8s/README.md`](k8s/README.md). The deployment goes only as far as it can explain itself; autoscaling is out of scope ([ADR 0019](docs/adr/0019-deploy-only-as-far-as-it-explains-itself.md)).
 
 ## Tests

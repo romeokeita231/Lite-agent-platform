@@ -301,6 +301,11 @@ Policy 没有 `fail` 动作（[ADR 0023](docs/adr/0023-policy-has-no-fail-action
 - **单写者**：平台没有 lease/心跳表，`ResetRunningRuns` 会接管所有 `running`。因此同一时间只应运行一个副本；Kubernetes 清单用 `replicas: 1`、`maxSurge: 0`、`maxUnavailable: 1`。
 - **优雅停机**：收到 SIGTERM/中断后，`/readyz` 先转 `503`，不再接受新 Run；Dispatcher 停止领取新 Run 并给在飞 Step 最多 `STEP_TIMEOUT + 5s` 收尾；随后 `ResetRunningRuns` 把未完成的 Run 归零为 `queued`，最后关闭 HTTP。Kubernetes 清单的 `terminationGracePeriodSeconds: 30` 覆盖这段过程。
 - **指标**：`/metrics` 暴露 Run 状态、Step 重试、模型 fallback 与耗时、工具调用、上下文 token、租户在飞数量。指标不是账本，重启会丢（[ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)）。
+- **看运行情况**：没有 Dashboard 界面，这是设计决定——所有交互走 API/CLI。`scripts/status.ps1` 一次打印一屏快照：容器状态、`/healthz` 与 `/readyz`、按状态汇总的 Run、仍在飞的 Run（`queued`/`running`/`waiting_human`）、最近五次 Run，以及从账本本身读出的 Checkpoint/Span 条数。
+
+  ```powershell
+  powershell -File scripts/status.ps1
+  ```
 - **部署**：清单见 [`k8s/`](k8s/)，说明见 [`k8s/README.md`](k8s/README.md)。部署只做到能讲清楚，不追求自动扩缩容（[ADR 0019](docs/adr/0019-deploy-only-as-far-as-it-explains-itself.md)）。
 
 ## 测试
