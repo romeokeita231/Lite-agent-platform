@@ -50,7 +50,7 @@ func runDemo(reset bool, w io.Writer) error {
 		metricsAddr = defaultMetricsAddr
 	}
 	if err := checkListenAddress(metricsAddr); err != nil {
-		return fmt.Errorf("start metrics: %v; stop the process using it (the compose stack uses port 9091) or set METRICS_ADDR to a different port", err)
+		fmt.Fprintf(os.Stderr, "demo: warning: metrics will not be served: %v; stop the process using it (the compose stack uses port 9091) or set METRICS_ADDR to a different port\n", err)
 	}
 	dsn, err := supervisor.StartDatabase(ctx)
 	if err != nil {

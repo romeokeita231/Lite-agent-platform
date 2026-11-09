@@ -33,6 +33,16 @@ ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
 PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 
 
+Third-party components inside the bundled PostgreSQL distribution
+-----------------------------------------------------------------
+postgres.zip is the unmodified EDB Windows x64 binary distribution of PostgreSQL 16.4. Its
+binaries link against further components, each distributed under its own licence, including
+(at least) OpenSSL (Apache-2.0), ICU (Unicode licence), zlib (zlib licence) and libxml2 (MIT).
+This file does not restate those licences: the authoritative notices and licence files travel
+inside postgres.zip itself, under doc/ and share/, and remain in the extracted data directory.
+If you redistribute this demo, carry those files along with it.
+
+
 Go runtime
 ----------
 platform.exe and policy-example.exe are Go programs and therefore contain the

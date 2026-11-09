@@ -83,6 +83,17 @@ func TestPlatformDemoStartsAndStopsTheWholeStack(t *testing.T) {
 		t.Fatalf("GET /v1/agents without a bearer token = %d, want 401", got)
 	}
 
+	if got, _ := demoGetBody(t, base+"/metrics"); got != http.StatusNotFound {
+		t.Fatalf("GET /metrics on the business port = %d, want 404", got)
+	}
+	metricsStatus, metricsBody := demoGetBody(t, "http://127.0.0.1:19091/metrics")
+	if metricsStatus != http.StatusOK {
+		t.Fatalf("GET /metrics on the metrics listener = %d, want 200", metricsStatus)
+	}
+	if !strings.Contains(metricsBody, "platform_runs") {
+		t.Fatalf("metrics listener body does not contain platform_runs:\n%s", metricsBody)
+	}
+
 	proc := &platformProcess{cmd: cmd, log: logFile, path: logPath}
 	signalShutdown(t, proc)
 
@@ -160,6 +171,20 @@ func demoGet(target string) (int, error) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, nil
+}
+
+func demoGetBody(t *testing.T, target string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(target)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", target, err)
+	}
+	return resp.StatusCode, string(body)
 }
 
 func demoAPIKey(t *testing.T, logPath, tenant string) string {

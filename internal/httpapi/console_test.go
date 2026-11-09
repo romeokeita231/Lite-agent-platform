@@ -49,6 +49,7 @@ func TestConsoleShellDoesNotRequireAuth(t *testing.T) {
 		t.Fatalf("GET /console/does-not-exist = %d, want 404", got)
 	}
 	runID := "run_missing"
+	// Hand-maintained list: when a route is added to NewMux in router.go, add it here too.
 	routes := []struct {
 		method string
 		path   string

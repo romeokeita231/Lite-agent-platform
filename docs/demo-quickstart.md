@@ -4,7 +4,7 @@ This zip is a demo distribution, not the production delivery form. Production re
 
 ## Run
 
-1. Extract the zip anywhere outside the repository.
+1. Extract the zip anywhere except inside a source checkout of this project (the demo refuses to put its data directory in a git working tree).
 2. In the extracted directory:
 
    ```powershell
