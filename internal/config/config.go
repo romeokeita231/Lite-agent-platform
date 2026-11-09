@@ -11,6 +11,7 @@ import (
 type Config struct {
 	DatabaseURL       string
 	HTTPAddr          string
+	MetricsAddr       string
 	StepTimeout       time.Duration
 	MaxStepAttempts   int
 	TenantConcurrency int
@@ -77,6 +78,7 @@ func Load() (Config, error) {
 	return Config{
 		DatabaseURL:       databaseURL,
 		HTTPAddr:          envOr("HTTP_ADDR", ":8080"),
+		MetricsAddr:       envOr("METRICS_ADDR", "127.0.0.1:9091"),
 		StepTimeout:       stepTimeout,
 		MaxStepAttempts:   maxStepAttempts,
 		TenantConcurrency: tenantConcurrency,

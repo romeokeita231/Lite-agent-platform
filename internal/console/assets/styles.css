@@ -1,0 +1,144 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --border: #c9ced6;
+  --muted: #5d6675;
+  --ok: #16794a;
+  --bad: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #f4f5f7;
+  color: #18202c;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+
+.bar h1 {
+  margin: 0 auto 0 0;
+  font-size: 1.1rem;
+}
+
+.health {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.pill {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: #f8f9fb;
+}
+
+.pill b {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pill[data-state="ok"] b {
+  color: var(--ok);
+}
+
+.pill[data-state="bad"] b {
+  color: var(--bad);
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #eef1f5;
+}
+
+main {
+  max-width: 1080px;
+  margin: 2rem auto;
+  padding: 0 1.25rem;
+}
+
+.panel {
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.placeholder {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 1rem;
+}
+
+@media (max-width: 760px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+#gate, #checking {
+  max-width: 34rem;
+}
+
+#gate h2 {
+  margin-top: 0;
+}
+
+#gate-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+#key-input {
+  flex: 1 1 16rem;
+  font: inherit;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+}
+
+.error {
+  min-height: 1.25rem;
+  margin: 0.75rem 0 0;
+  color: var(--bad);
+  font-size: 0.9rem;
+}

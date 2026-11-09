@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platform Console</title>
+<link rel="stylesheet" href="/console/static/styles.css">
+</head>
+<body>
+<header class="bar">
+  <h1>Platform Console</h1>
+  <div class="health">
+    <span class="pill" data-probe="/healthz">healthz <b>unknown</b></span>
+    <span class="pill" data-probe="/readyz">readyz <b>unknown</b></span>
+  </div>
+  <button id="change-key" type="button" hidden>Change key</button>
+</header>
+<main>
+  <section id="gate">
+    <h2>Connect</h2>
+    <p>The tenant API key stays in this browser's localStorage and is sent as an Authorization header. It never appears in a URL.</p>
+    <form id="gate-form">
+      <input id="key-input" type="password" autocomplete="off" spellcheck="false" placeholder="Tenant API key" required>
+      <button type="submit">Open console</button>
+    </form>
+    <p id="gate-error" class="error" role="alert"></p>
+  </section>
+  <section id="checking" hidden>Checking key…</section>
+  <section id="shell" hidden>
+    <div class="layout">
+      <section class="panel">
+        <h2>Runs</h2>
+        <p class="placeholder">The tenant run list is added by a later change.</p>
+      </section>
+      <section class="panel">
+        <h2>Run detail</h2>
+        <p class="placeholder">Checkpoints, spans and human review are added by a later change.</p>
+      </section>
+    </div>
+  </section>
+</main>
+<script src="/console/static/app.js"></script>
+</body>
+</html>

@@ -12,7 +12,7 @@ import (
 
 func TestProbesReflectReadinessAndDraining(t *testing.T) {
 	ready := observability.NewReadiness()
-	srv := httptest.NewServer(httpapi.NewMux(ready, nil, nil, ready, nil))
+	srv := httptest.NewServer(httpapi.NewMux(ready, nil, nil, ready))
 	defer srv.Close()
 
 	check := func(path string, want int) {
