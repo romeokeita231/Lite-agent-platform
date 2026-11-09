@@ -149,6 +149,26 @@ powershell -File scripts/demo-2-tool-hang.ps1
 powershell -File scripts/demo-3-crash.ps1
 ```
 
+## 演示 zip
+
+`scripts/build-demo.ps1` 打出一个自包含的 Windows amd64 演示 zip。它是演示分发，不是生产交付形态：生产仍是一个 platform 二进制加 policy、Postgres 两个容器（[ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)）。zip 根目录包含 `platform.exe`、`policy-example.exe`、`postgres.zip`（钉版本的 EDB Postgres 16.4 归档）和 `QUICKSTART.md`。
+
+```powershell
+powershell -File scripts/build-demo.ps1
+```
+
+产物是 `dist/lite-agent-platform-demo-<version>.zip`（约 330 MB）。Postgres 归档缓存在 `dist/cache/`；脚本钉住它的版本、字节数和 SHA256，重复构建复用缓存，不会静默重新下载。
+
+解压后在该目录直接运行：
+
+```powershell
+.\platform.exe demo
+```
+
+运行时**不需要** Go、Docker 或测试工具链。命令会启动自带的 Postgres、执行迁移与 seed、把 Policy 作为子进程拉起，并提供 API 与观察台。它会打印观察台地址（`http://127.0.0.1:8080/console`）以及租户 `demo-a`、`demo-b` 的 API key；把 key 粘进观察台即可。端口 8080/5433/9090 与 compose 栈相同，演示 zip 与 `docker compose` 只能二选一。
+
+可用覆盖变量：`HTTP_ADDR`、`DATABASE_URL`、`POLICY_ADDR`、`METRICS_ADDR`、`DEMO_DATA_DIR`。租户数据持久保存在 `DEMO_DATA_DIR`（默认 `%LOCALAPPDATA%\LiteAgentPlatform\demo`）；`.\platform.exe demo --reset` 会在启动前清空。Ctrl-C 会停止整个栈和所有子进程。详见 [`docs/demo-quickstart.md`](docs/demo-quickstart.md)。
+
 ## 配置
 
 ### 平台进程

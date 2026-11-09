@@ -149,6 +149,26 @@ powershell -File scripts/demo-2-tool-hang.ps1
 powershell -File scripts/demo-3-crash.ps1
 ```
 
+## Demo zip
+
+`scripts/build-demo.ps1` builds a self-contained Windows amd64 demo zip. It is a demo distribution, not the production delivery form: production stays one platform binary plus policy and Postgres containers ([ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)). The zip root contains `platform.exe`, `policy-example.exe`, `postgres.zip` (a pinned EDB Postgres 16.4 archive) and `QUICKSTART.md`.
+
+```powershell
+powershell -File scripts/build-demo.ps1
+```
+
+Output: `dist/lite-agent-platform-demo-<version>.zip` (about 330 MB). The Postgres archive is cached at `dist/cache/`; its version, byte size and SHA256 are pinned in the script, so re-runs reuse the cache and never download silently.
+
+Extract the zip and run from that directory:
+
+```powershell
+.\platform.exe demo
+```
+
+Go, Docker and the test toolchain are **not** required at runtime. The command starts the bundled Postgres, runs migrations and seed, starts the Policy as a child process, and serves the API and console. It prints the console URL (`http://127.0.0.1:8080/console`) and the API keys for tenants `demo-a` and `demo-b`; paste a key into the console. Ports 8080/5433/9090 are the same as the compose stack, so the demo and `docker compose` are mutually exclusive.
+
+Overrides: `HTTP_ADDR`, `DATABASE_URL`, `POLICY_ADDR`, `METRICS_ADDR` and `DEMO_DATA_DIR`. Tenant data persists in `DEMO_DATA_DIR` (default `%LOCALAPPDATA%\LiteAgentPlatform\demo`); `.\platform.exe demo --reset` clears it before starting. Ctrl-C stops the stack and every child process. Details are in [`docs/demo-quickstart.md`](docs/demo-quickstart.md).
+
 ## Configuration
 
 ### Platform process
