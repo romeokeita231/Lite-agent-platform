@@ -33,6 +33,7 @@ services:
       CONTEXT_MAX_KEEP: 16
       MODEL_BASE_URL: ${MODEL_BASE_URL:-http://policy-example:9090/v1}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
+      METRICS_ADDR: ":9091"
       POLICY_SECRET_DEMO: ${POLICY_SECRET:-demo-policy-secret}
       POLICY_SECRET_TOOL_SLOW: ${POLICY_SECRET:-demo-policy-secret}
       POLICY_SECRET_HUMAN: ${POLICY_SECRET:-demo-policy-secret}
@@ -40,6 +41,7 @@ services:
       DEMO_API_KEY_B: ${DEMO_API_KEY_B:-demo-b-api-key}
     ports:
       - "8080:8080"
+      - "127.0.0.1:9091:9091"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/readyz || exit 1"]
       interval: 5s
