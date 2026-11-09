@@ -124,6 +124,29 @@ func TestConsoleRunDetailWiresStepsAndTrace(t *testing.T) {
 	}
 }
 
+func TestConsoleHumanReviewFormWiresHumanInputSubmission(t *testing.T) {
+	h := console.Handler()
+	status, _, index := get(t, h, "/console")
+	if status != http.StatusOK {
+		t.Fatalf("GET /console = %d, want 200", status)
+	}
+	for _, want := range []string{`id="human-form"`, `id="human-input"`, `id="human-prompt"`, `id="human-error"`} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("index is missing %q", want)
+		}
+	}
+
+	status, _, script := get(t, h, "/console/static/app.js")
+	if status != http.StatusOK {
+		t.Fatalf("GET app.js = %d, want 200", status)
+	}
+	for _, want := range []string{"/human-input", "waiting_human", "step_index", "humanOpen", "409"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("app.js is missing %q", want)
+		}
+	}
+}
+
 func TestUnknownConsolePathsReturn404(t *testing.T) {
 	h := console.Handler()
 	for _, path := range []string{

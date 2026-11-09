@@ -70,6 +70,14 @@
             <dt>Pending step</dt>
             <dd><pre id="detail-pending-step"></pre></dd>
           </dl>
+          <form id="human-form" class="human" hidden>
+            <h3>Human Review</h3>
+            <p id="human-prompt" class="prompt"></p>
+            <label for="human-input">Response (JSON)</label>
+            <textarea id="human-input" rows="4" spellcheck="false"></textarea>
+            <button id="human-submit" type="submit">Submit response</button>
+            <p id="human-error" class="error" role="alert"></p>
+          </form>
           <h3>Checkpoints</h3>
           <ol id="checkpoint-list" class="checkpoints"></ol>
           <h3>Spans</h3>

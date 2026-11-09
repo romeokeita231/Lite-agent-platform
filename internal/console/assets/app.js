@@ -28,11 +28,21 @@ var checkpointList = document.getElementById("checkpoint-list");
 var traceList = document.getElementById("trace-list");
 var detailError = document.getElementById("detail-error");
 
+var humanForm = document.getElementById("human-form");
+var humanPrompt = document.getElementById("human-prompt");
+var humanInput = document.getElementById("human-input");
+var humanError = document.getElementById("human-error");
+var humanSubmit = document.getElementById("human-submit");
+
 var active = false;
 var listInFlight = false;
 var detailInFlight = false;
 var selectedRunID = "";
 var agentLabels = {};
+var humanOpen = false;
+var humanDirty = false;
+var humanStepIndex = 0;
+var detailNotice = "";
 
 function agentLabel(id) {
   return agentLabels[id] || id;
@@ -100,6 +110,16 @@ function showGate(message) {
   gateError.textContent = message || "";
   input.value = "";
   setView("gate");
+  selectedRunID = "";
+  detailNotice = "";
+  closeHumanForm(true);
+  runList.textContent = "";
+  runCounts.textContent = "";
+  listError.textContent = "";
+  detail.hidden = true;
+  detailEmpty.hidden = false;
+  detailEmpty.textContent = "Select a run to inspect it.";
+  resetDetail();
 }
 
 function apiFetch(path, options) {
@@ -297,6 +317,8 @@ function selectRun(id) {
   detailEmpty.textContent = "Select a run to inspect it.";
   detail.hidden = false;
   detailError.textContent = "";
+  detailNotice = "";
+  closeHumanForm(true);
   if (!same) {
     resetDetail();
   }
@@ -326,7 +348,7 @@ function fetchDetailJSON(path) {
 }
 
 function pollDetail() {
-  if (!active || detailInFlight || !selectedRunID) {
+  if (!active || detailInFlight || !selectedRunID || humanOpen || humanDirty) {
     return;
   }
   var id = selectedRunID;
@@ -336,7 +358,7 @@ function pollDetail() {
     fetchDetailJSON("/v1/runs/" + encodeURIComponent(id) + "/steps"),
     fetchDetailJSON("/v1/runs/" + encodeURIComponent(id) + "/trace")
   ]).then(function (results) {
-    if (id !== selectedRunID) {
+    if (id !== selectedRunID || humanOpen || humanDirty) {
       return;
     }
     var run = results[0];
@@ -344,20 +366,19 @@ function pollDetail() {
       return;
     }
     if (run.status === 404) {
-      detail.hidden = true;
-      detailEmpty.hidden = false;
-      detailEmpty.textContent = "run not found";
-      detailError.textContent = "";
+      showRunNotFound();
       return;
     }
     if (run.status !== 200 || !run.body) {
       detailError.textContent = "run detail failed with status " + run.status;
       return;
     }
-    detailError.textContent = "";
+    var steps = results[1].status === 200 && results[1].body ? results[1].body : [];
+    detailError.textContent = detailNotice;
     renderFacts(run.body);
-    renderCheckpoints(results[1].status === 200 && results[1].body ? results[1].body : []);
+    renderCheckpoints(steps);
     renderTrace(results[2].status === 200 && results[2].body ? results[2].body : null);
+    maybeShowHumanForm(run.body, steps);
   }).catch(function (err) {
     detailError.textContent = err && err.message ? err.message : "run detail request failed";
   }).then(function () {
@@ -442,6 +463,121 @@ function renderTrace(trace) {
     traceList.appendChild(group);
   });
 }
+
+function closeHumanForm(clear) {
+  humanOpen = false;
+  humanDirty = false;
+  humanForm.hidden = true;
+  humanError.textContent = "";
+  humanSubmit.disabled = false;
+  if (clear) {
+    humanInput.value = "";
+  }
+}
+
+function nextStepIndex(steps) {
+  if (!steps || steps.length === 0) {
+    return 0;
+  }
+  return steps[steps.length - 1].step_index + 1;
+}
+
+function pendingPrompt(pending) {
+  if (!pending || typeof pending !== "object") {
+    return "";
+  }
+  return typeof pending.prompt === "string" ? pending.prompt : "";
+}
+
+function maybeShowHumanForm(run, steps) {
+  if (run.status !== "waiting_human") {
+    if (humanOpen) {
+      closeHumanForm(true);
+    }
+    return;
+  }
+  if (humanOpen) {
+    return;
+  }
+  humanOpen = true;
+  humanDirty = false;
+  humanStepIndex = nextStepIndex(steps);
+  humanPrompt.textContent = run.human_prompt || pendingPrompt(run.pending_step) ||
+    "This run is waiting for human input.";
+  humanError.textContent = "";
+  humanForm.hidden = false;
+}
+
+function showRunNotFound() {
+  closeHumanForm(true);
+  detail.hidden = true;
+  detailEmpty.hidden = false;
+  detailEmpty.textContent = "run not found";
+  detailError.textContent = "";
+}
+
+function submitHumanInput(event) {
+  event.preventDefault();
+  if (!selectedRunID) {
+    return;
+  }
+  var raw = humanInput.value.trim();
+  var parsed = null;
+  if (raw !== "") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      humanError.textContent = "Response must be valid JSON.";
+      humanDirty = true;
+      return;
+    }
+  }
+  var id = selectedRunID;
+  humanError.textContent = "";
+  humanSubmit.disabled = true;
+  apiFetch("/v1/runs/" + encodeURIComponent(id) + "/human-input", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ step_index: humanStepIndex, input: parsed })
+  }).then(function (response) {
+    if (response.status === 401) {
+      return null;
+    }
+    if (response.status === 404) {
+      showRunNotFound();
+      return null;
+    }
+    if (response.status === 409) {
+      detailNotice = "This run is no longer waiting for this step.";
+      closeHumanForm(true);
+      detailError.textContent = detailNotice;
+      pollDetail();
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error("human input failed with status " + response.status);
+    }
+    return response.json();
+  }).then(function (run) {
+    if (!run) {
+      return;
+    }
+    detailNotice = "";
+    closeHumanForm(true);
+    renderFacts(run);
+    pollDetail();
+  }).catch(function (err) {
+    humanError.textContent = err && err.message ? err.message : "human input request failed";
+  }).then(function () {
+    humanSubmit.disabled = false;
+  });
+}
+
+humanInput.addEventListener("input", function () {
+  humanDirty = true;
+});
+
+humanForm.addEventListener("submit", submitHumanInput);
 
 statusFilter.addEventListener("change", pollList);
 agentFilter.addEventListener("change", pollList);

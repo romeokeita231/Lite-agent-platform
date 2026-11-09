@@ -314,6 +314,46 @@ pre {
   color: var(--bad);
 }
 
+.human {
+  margin: 1rem 0;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #d8c8ea;
+  border-radius: 8px;
+  background: #faf7fd;
+}
+
+.human h3 {
+  margin-top: 0;
+}
+
+.human .prompt {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.human label {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.human textarea {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.human button {
+  margin-top: 0.5rem;
+}
+
 .layout > .panel {
   min-width: 0;
 }
