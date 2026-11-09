@@ -77,3 +77,7 @@ _Avoid_: 链路、日志、audit log
 **Span**:
 Trace 里一段有起止时间的记录。一个 Step 至少对应一个 Span；同一次模型调用的每次 fallback 尝试各自成一个 Span，所以 Span 比 Step 密。
 _Avoid_: 埋点、阶段
+
+**Console**:
+内嵌在 platform 二进制里的只读观察台（`/console`），凭租户 API key 只观察本租户的 Run、Checkpoint 与 Span，并可对 `waiting_human` 的 Run 提交人工应答。它不创建、不编排、不发布，因此不属于 [ADR 0011](docs/adr/0011-runtime-not-an-app-builder.md) 排除的"应用构建"（[ADR 0026](docs/adr/0026-console-observes-not-builds.md)）。
+_Avoid_: Dashboard、管理界面、控制台

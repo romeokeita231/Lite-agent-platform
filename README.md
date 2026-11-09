@@ -157,6 +157,7 @@ powershell -File scripts/demo-3-crash.ps1
 | --- | --- | --- |
 | `DATABASE_URL` | none, required | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | HTTP listen address |
+| `METRICS_ADDR` | `127.0.0.1:9091` | Listen address of the dedicated Prometheus metrics listener; loopback only by default |
 | `STEP_TIMEOUT` | `10s` | Per-step timeout; also the timeout basis for Policy decisions, model calls, and tool calls |
 | `MAX_STEP_ATTEMPTS` | `4` | Maximum attempts for one step; backoff starts at 1s, doubles, caps at 30s |
 | `TENANT_CONCURRENCY` | `4` | Maximum concurrently advancing runs per tenant; must be positive |
@@ -209,7 +210,7 @@ MODEL_API_KEY=
 
 ## HTTP API
 
-`/healthz`, `/readyz`, and `/metrics` are public. Every other `/v1/*` route requires `Authorization: Bearer <tenant API key>` and can only see that tenant's data. Cross-tenant access to runs, agents, evals, and usage returns `404 not_found`; an unresolvable tool version returns `400 bad_request`. Errors share one body shape:
+`/healthz` and `/readyz` are public on the business port, and the read-only console page at `/console` loads without a key. Prometheus metrics are served on a separate listener (`METRICS_ADDR`, loopback by default), never anonymously on the business port. Every `/v1/*` route requires `Authorization: Bearer <tenant API key>` and can only see that tenant's data. Cross-tenant access to runs, agents, evals, and usage returns `404 not_found`; an unresolvable tool version returns `400 bad_request`. Errors share one body shape:
 
 ```json
 {"error":"not_found","message":"run not found"}
@@ -219,10 +220,12 @@ MODEL_API_KEY=
 | --- | --- |
 | `GET /healthz` | Liveness, always `200` |
 | `GET /readyz` | Readiness; `503` while the database is unavailable, migrations are incomplete, or the process is draining |
-| `GET /metrics` | Prometheus metrics, with no tenant labels |
+| `GET /console` | Embedded, read-only console page (no key required to load; it asks for one) |
+| `GET /metrics` | Prometheus metrics on the metrics listener only, with no tenant labels |
 | `POST /v1/agents` | Register an agent: `name`, `policy_url`, `secret_env`; duplicate name `409` |
 | `GET /v1/agents` | List this tenant's agents |
 | `POST /v1/runs` | Submit a run: `agent_id`, `input`; unknown or cross-tenant agent `404`; while draining `503` |
+| `GET /v1/runs` | List this tenant's runs newest first: `status`, `agent_id`, bounded `limit`; the same body carries per-status counts for this tenant |
 | `GET /v1/runs/{id}` | Run detail with `status`, `output`, `terminal_reason`, `pending_step` |
 | `GET /v1/runs/{id}/steps` | Checkpoints in order |
 | `GET /v1/runs/{id}/trace` | Spans grouped by step |
@@ -300,8 +303,8 @@ Model fallback happens only on retryable errors: 429, 5xx, timeouts, and connect
 - **Recovery**: at startup, leftover `running` runs are reset to `queued` and continue after the last Checkpoint. Human waits likewise depend only on the ledger, not on memory.
 - **Single writer**: there is no lease or heartbeat table, and `ResetRunningRuns` takes over every `running` run. Run one replica at a time; the Kubernetes manifest uses `replicas: 1`, `maxSurge: 0`, `maxUnavailable: 1`.
 - **Graceful shutdown**: on SIGTERM/interrupt, `/readyz` flips to `503` and new runs are refused; the dispatcher stops picking up runs and gives in-flight steps up to `STEP_TIMEOUT + 5s`; `ResetRunningRuns` then returns unfinished runs to `queued`; HTTP closes last. The Kubernetes manifest's `terminationGracePeriodSeconds: 30` covers this sequence.
-- **Metrics**: `/metrics` exposes run status, step retries, model fallbacks and latency, tool calls, context tokens, and per-tenant inflight counts. Metrics are not the ledger and are lost on restart ([ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)).
-- **Watching a running stack**: there is no dashboard UI, by design — every interaction is API or CLI. `scripts/status.ps1` prints one snapshot: container state, `/healthz` and `/readyz`, runs by status, anything still in flight (`queued`/`running`/`waiting_human`), the last five runs, and Checkpoint/Span counts read from the ledger itself.
+- **Metrics**: `/metrics` on the dedicated listener (`METRICS_ADDR`, `127.0.0.1:9091` by default) exposes run status, step retries, model fallbacks and latency, tool calls, context tokens, and per-tenant inflight counts. Metrics are not the ledger and are lost on restart ([ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)).
+- **Watching a running stack**: open `http://localhost:8080/console` and paste a tenant API key. The console is embedded in the platform binary and read-only: it lists your tenant's runs, shows a run's Checkpoints and Spans, and lets you answer a `waiting_human` run. It cannot create, orchestrate or publish agents ([ADR 0026](docs/adr/0026-console-observes-not-builds.md)). `scripts/status.ps1` still prints one snapshot: container state, `/healthz` and `/readyz`, runs by status, anything still in flight (`queued`/`running`/`waiting_human`), the last five runs, and Checkpoint/Span counts read from the ledger itself.
 
   ```powershell
   powershell -File scripts/status.ps1

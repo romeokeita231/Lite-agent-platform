@@ -157,6 +157,7 @@ powershell -File scripts/demo-3-crash.ps1
 | --- | --- | --- |
 | `DATABASE_URL` | 无，必填 | PostgreSQL 连接串 |
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
+| `METRICS_ADDR` | `127.0.0.1:9091` | 独立 Prometheus 指标监听地址，默认只绑回环 |
 | `STEP_TIMEOUT` | `10s` | 单个 Step 的超时；也是 Policy 决策、模型调用、工具调用的超时基准 |
 | `MAX_STEP_ATTEMPTS` | `4` | 同一个 Step 的最大尝试次数；退避从 1s 起翻倍，封顶 30s |
 | `TENANT_CONCURRENCY` | `4` | 每个租户同时推进的 Run 上限，必须为正 |
@@ -209,7 +210,7 @@ MODEL_API_KEY=
 
 ## HTTP API
 
-`/healthz`、`/readyz`、`/metrics` 公开；其余 `/v1/*` 都要求 `Authorization: Bearer <租户 API key>`，并只能访问该租户的数据。Run、Agent、评测、用量等资源跨租户访问表现为 `404 not_found`；工具解析不到版本时是 `400 bad_request`。错误体统一为：
+`/healthz` 与 `/readyz` 在业务端口公开，只读观察台 `/console` 无需 key 即可加载。Prometheus 指标走独立监听（`METRICS_ADDR`，默认只绑回环），不在业务端口匿名暴露。其余 `/v1/*` 都要求 `Authorization: Bearer <租户 API key>`，并只能访问该租户的数据。Run、Agent、评测、用量等资源跨租户访问表现为 `404 not_found`；工具解析不到版本时是 `400 bad_request`。错误体统一为：
 
 ```json
 {"error":"not_found","message":"run not found"}
@@ -219,10 +220,12 @@ MODEL_API_KEY=
 | --- | --- |
 | `GET /healthz` | 存活检查，恒 `200` |
 | `GET /readyz` | 就绪检查；数据库不可用、迁移未完成或正在停机时 `503` |
-| `GET /metrics` | Prometheus 指标，不带租户标签 |
+| `GET /console` | 内嵌的只读观察台页面（加载不需 key，页面会要求粘贴） |
+| `GET /metrics` | Prometheus 指标，仅在指标监听上提供，不带租户标签 |
 | `POST /v1/agents` | 注册 Agent：`name`、`policy_url`、`secret_env`；重名 `409` |
 | `GET /v1/agents` | 列出本租户 Agent |
 | `POST /v1/runs` | 提交 Run：`agent_id`、`input`；Agent 不存在或跨租户 `404`；停机中 `503` |
+| `GET /v1/runs` | 按创建时间倒序列出本租户 Run：`status`、`agent_id` 过滤，`limit` 有界；同一响应带本租户按状态计数 |
 | `GET /v1/runs/{id}` | Run 详情，含 `status`、`output`、`terminal_reason`、`pending_step` |
 | `GET /v1/runs/{id}/steps` | 按顺序列出 Checkpoint |
 | `GET /v1/runs/{id}/trace` | Span 按 Step 分组 |
@@ -300,8 +303,8 @@ Policy 没有 `fail` 动作（[ADR 0023](docs/adr/0023-policy-has-no-fail-action
 - **恢复**：启动时把遗留的 `running` Run 重置为 `queued`，从最后一条 Checkpoint 之后继续。人工等待同样只靠账本，不靠内存。
 - **单写者**：平台没有 lease/心跳表，`ResetRunningRuns` 会接管所有 `running`。因此同一时间只应运行一个副本；Kubernetes 清单用 `replicas: 1`、`maxSurge: 0`、`maxUnavailable: 1`。
 - **优雅停机**：收到 SIGTERM/中断后，`/readyz` 先转 `503`，不再接受新 Run；Dispatcher 停止领取新 Run 并给在飞 Step 最多 `STEP_TIMEOUT + 5s` 收尾；随后 `ResetRunningRuns` 把未完成的 Run 归零为 `queued`，最后关闭 HTTP。Kubernetes 清单的 `terminationGracePeriodSeconds: 30` 覆盖这段过程。
-- **指标**：`/metrics` 暴露 Run 状态、Step 重试、模型 fallback 与耗时、工具调用、上下文 token、租户在飞数量。指标不是账本，重启会丢（[ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)）。
-- **看运行情况**：没有 Dashboard 界面，这是设计决定——所有交互走 API/CLI。`scripts/status.ps1` 一次打印一屏快照：容器状态、`/healthz` 与 `/readyz`、按状态汇总的 Run、仍在飞的 Run（`queued`/`running`/`waiting_human`）、最近五次 Run，以及从账本本身读出的 Checkpoint/Span 条数。
+- **指标**：`/metrics` 在独立监听（`METRICS_ADDR`，默认 `127.0.0.1:9091`）暴露 Run 状态、Step 重试、模型 fallback 与耗时、工具调用、上下文 token、租户在飞数量。指标不是账本，重启会丢（[ADR 0018](docs/adr/0018-metrics-are-not-the-ledger.md)）。
+- **看运行情况**：打开 `http://localhost:8080/console` 并粘贴租户 API key。观察台内嵌在 platform 二进制里，只读：列出本租户 Run、展示某个 Run 的 Checkpoint 与 Span，并能给 `waiting_human` 的 Run 提交人工应答。它不能创建、编排或发布 Agent（[ADR 0026](docs/adr/0026-console-observes-not-builds.md)）。`scripts/status.ps1` 仍可一次打印一屏快照：容器状态、`/healthz` 与 `/readyz`、按状态汇总的 Run、仍在飞的 Run（`queued`/`running`/`waiting_human`）、最近五次 Run，以及从账本本身读出的 Checkpoint/Span 条数。
 
   ```powershell
   powershell -File scripts/status.ps1
