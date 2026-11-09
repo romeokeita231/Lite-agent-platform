@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,6 +23,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
+	"github.com/romeokeita231/Lite-agent-platform/internal/seed"
 	"github.com/romeokeita231/Lite-agent-platform/internal/toolgw"
 )
 
@@ -53,16 +52,8 @@ func main() {
 	}
 }
 
-func newAPIKey() (string, error) {
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(raw[:]), nil
-}
-
 func keygen(w io.Writer) error {
-	apiKey, err := newAPIKey()
+	apiKey, err := seed.NewAPIKey()
 	if err != nil {
 		return err
 	}
