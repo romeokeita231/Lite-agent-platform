@@ -151,7 +151,7 @@ powershell -File scripts/demo-3-crash.ps1
 
 ## 演示 zip
 
-`scripts/build-demo.ps1` 打出一个自包含的 Windows amd64 演示 zip。它是演示分发，不是生产交付形态：生产仍是一个 platform 二进制加 policy、Postgres 两个容器（[ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)）。zip 根目录包含 `platform.exe`、`policy-example.exe`、`postgres.zip`（钉版本的 EDB Postgres 16.4 归档）和 `QUICKSTART.md`。
+`scripts/build-demo.ps1` 打出一个自包含的 Windows amd64 演示 zip。它是演示分发，不是生产交付形态：生产仍是一个 platform 二进制加 policy、Postgres 两个容器（[ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)）。zip 根目录包含 `platform.exe`、`policy-example.exe`、`postgres.zip`（裁剪过的 EDB Postgres 16.4 归档：只留 `bin/`、`lib/`、`share/` 且去掉语言翻译；完整 EDB 归档只下载一次并按钉住的 SHA-256 校验）、`QUICKSTART.md` 和 `THIRD-PARTY-NOTICES.txt`。
 
 ```powershell
 powershell -File scripts/build-demo.ps1

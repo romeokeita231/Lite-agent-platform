@@ -69,9 +69,68 @@ finally {
     Pop-Location
 }
 
-Copy-Item -LiteralPath $ArchivePath -Destination (Join-Path $StagingDir 'postgres.zip')
+function New-PostgresSubsetArchive {
+    param([string]$Destination)
+    $root = Join-Path $CacheDir 'postgres-subset'
+    if (Test-Path -LiteralPath $root) {
+        try { [System.IO.Directory]::Delete($root, $true) } catch { Write-Warning "could not clear $root; reusing whatever is there" }
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName
+            if ($name.EndsWith('/')) { continue }
+            $keep = $name.StartsWith('pgsql/bin/') -or
+                $name.StartsWith('pgsql/lib/') -or
+                ($name.StartsWith('pgsql/share/') -and -not $name.StartsWith('pgsql/share/locale/'))
+            if (-not $keep) { continue }
+            $target = Join-Path $root ($name -replace '/', '\')
+            $parent = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            [System.IO.File]::SetLastWriteTimeUtc($target, $FixedTimestamp)
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+    $zip = [System.IO.Compression.ZipFile]::Open($Destination, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($root.Length + 1) -replace '\\', '/'
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, $_.FullName, $relative,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+    try { [System.IO.Directory]::Delete($root, $true) } catch { Write-Warning "left the extracted Postgres subset in ${root}: $($_.Exception.Message)" }
+
+    $inner = [System.IO.Compression.ZipFile]::OpenRead($Destination)
+    try {
+        $innerNames = @($inner.Entries | ForEach-Object { $_.FullName })
+    }
+    finally {
+        $inner.Dispose()
+    }
+    foreach ($required in 'pgsql/bin/initdb.exe', 'pgsql/bin/postgres.exe', 'pgsql/share/postgres.bki', 'pgsql/share/postgresql.conf.sample', 'pgsql/share/timezone/UTC') {
+        if ($innerNames -notcontains $required) {
+            throw "trimmed postgres.zip is missing $required"
+        }
+    }
+    if ($innerNames -match '^pgsql/(pgAdmin 4|StackBuilder|symbols|include|doc)/') {
+        throw 'trimmed postgres.zip still contains a dropped component'
+    }
+    Write-Output "trimmed postgres.zip: $((Get-Item -LiteralPath $Destination).Length) bytes, $($innerNames.Count) entries"
+}
+
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'docs\demo-quickstart.md') -Destination (Join-Path $StagingDir 'QUICKSTART.md')
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $StagingDir 'THIRD-PARTY-NOTICES.txt')
+New-PostgresSubsetArchive -Destination (Join-Path $StagingDir 'postgres.zip')
 
 Get-ChildItem -LiteralPath $StagingDir -Recurse | ForEach-Object {
     $_.LastWriteTimeUtc = $FixedTimestamp
