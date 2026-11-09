@@ -150,6 +150,60 @@ func (s *Store) CreateRun(ctx context.Context, run domain.Run) (domain.Run, erro
 	return run, nil
 }
 
+func (s *Store) ListRuns(ctx context.Context, status domain.RunStatus, agentID string, limit int) ([]domain.Run, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		runColumns+` from runs
+		 where tenant_id = $1
+		   and ($2 = '' or status = $2)
+		   and ($3 = '' or agent_id = $3)
+		 order by created_at desc, id desc
+		 limit $4`,
+		tenantID, string(status), agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Run, error) {
+		return scanRun(row)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if runs == nil {
+		runs = []domain.Run{}
+	}
+	return runs, nil
+}
+
+// CountTenantRunsByStatus scopes counts to the calling tenant.
+func (s *Store) CountTenantRunsByStatus(ctx context.Context) (map[domain.RunStatus]int64, error) {
+	tenantID, err := TenantOf(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `select status, count(*) from runs where tenant_id = $1 group by status`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[domain.RunStatus]int64)
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[domain.RunStatus(status)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 	tenantID, err := TenantOf(ctx)
 	if err != nil {

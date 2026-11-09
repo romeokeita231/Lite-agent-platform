@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ func NewMux(ready Readiness, store domain.Store, tools domain.ToolGateway, drain
 	mux.Handle("POST /v1/agents", api.authenticated(http.HandlerFunc(api.createAgent)))
 	mux.Handle("GET /v1/agents", api.authenticated(http.HandlerFunc(api.listAgents)))
 	mux.Handle("POST /v1/runs", api.authenticated(http.HandlerFunc(api.createRun)))
+	mux.Handle("GET /v1/runs", api.authenticated(http.HandlerFunc(api.listRuns)))
 	mux.Handle("GET /v1/runs/{id}", api.authenticated(http.HandlerFunc(api.getRun)))
 	mux.Handle("GET /v1/runs/{id}/steps", api.authenticated(http.HandlerFunc(api.getRunSteps)))
 	mux.Handle("GET /v1/runs/{id}/trace", api.authenticated(http.HandlerFunc(api.getRunTrace)))
@@ -183,6 +185,71 @@ func (a *API) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, run)
+}
+
+const (
+	defaultRunListLimit = 20
+	maxRunListLimit     = 100
+)
+
+var runListStatuses = []domain.RunStatus{
+	domain.RunQueued,
+	domain.RunRunning,
+	domain.RunWaitingHuman,
+	domain.RunCompleted,
+	domain.RunFailed,
+	domain.RunCancelled,
+}
+
+type runListResponse struct {
+	Runs   []domain.Run               `json:"runs"`
+	Counts map[domain.RunStatus]int64 `json:"counts"`
+}
+
+func validRunListStatus(status string) bool {
+	for _, candidate := range runListStatuses {
+		if string(candidate) == status {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *API) listRuns(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	status := query.Get("status")
+	if status != "" && !validRunListStatus(status) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"status must be one of queued, running, waiting_human, completed, failed, cancelled")
+		return
+	}
+	limit := defaultRunListLimit
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > maxRunListLimit {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	runs, err := a.store.ListRuns(r.Context(), domain.RunStatus(status), query.Get("agent_id"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "list runs failed")
+		return
+	}
+	tenantCounts, err := a.store.CountTenantRunsByStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "count tenant runs failed")
+		return
+	}
+	response := runListResponse{
+		Runs:   runs,
+		Counts: make(map[domain.RunStatus]int64, len(runListStatuses)),
+	}
+	for _, candidate := range runListStatuses {
+		response.Counts[candidate] = tenantCounts[candidate]
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 type humanInputRequest struct {
