@@ -135,12 +135,13 @@ func run() error {
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, gateway)}
 
 	serveErr := make(chan error, 1)
-	metricsErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.ListenAndServe()
 	}()
 	go func() {
-		metricsErr <- metricsServer.ListenAndServe()
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("metrics listener on %s failed: %v", cfg.MetricsAddr, err)
+		}
 	}()
 	go maint.loop(ctx, maintenanceInterval)
 
@@ -151,10 +152,6 @@ func run() error {
 	select {
 	case <-signals:
 	case err := <-serveErr:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-	case err := <-metricsErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}

@@ -49,17 +49,31 @@ func TestConsoleShellDoesNotRequireAuth(t *testing.T) {
 		t.Fatalf("GET /console/does-not-exist = %d, want 404", got)
 	}
 	runID := "run_missing"
-	routes := []string{
-		"/v1/runs",
-		"/v1/agents",
-		"/v1/models",
-		"/v1/runs/" + runID,
-		"/v1/runs/" + runID + "/steps",
-		"/v1/runs/" + runID + "/trace",
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/v1/agents"},
+		{http.MethodPost, "/v1/agents"},
+		{http.MethodGet, "/v1/runs"},
+		{http.MethodPost, "/v1/runs"},
+		{http.MethodGet, "/v1/runs/" + runID},
+		{http.MethodGet, "/v1/runs/" + runID + "/steps"},
+		{http.MethodGet, "/v1/runs/" + runID + "/trace"},
+		{http.MethodPost, "/v1/runs/" + runID + "/human-input"},
+		{http.MethodPost, "/v1/runs/" + runID + "/cancel"},
+		{http.MethodGet, "/v1/tools"},
+		{http.MethodPost, "/v1/tools"},
+		{http.MethodPost, "/v1/tools/some-tool/invoke"},
+		{http.MethodPost, "/v1/chat/completions"},
+		{http.MethodGet, "/v1/models"},
+		{http.MethodGet, "/v1/tenants/tenant_missing/usage"},
+		{http.MethodPost, "/v1/evals"},
+		{http.MethodGet, "/v1/evals/eval_missing"},
 	}
 	for _, route := range routes {
-		if got := status(http.MethodGet, route, nil); got != http.StatusUnauthorized {
-			t.Fatalf("GET %s without bearer = %d, want 401", route, got)
+		if got := status(route.method, route.path, nil); got != http.StatusUnauthorized {
+			t.Fatalf("%s %s without bearer = %d, want 401", route.method, route.path, got)
 		}
 	}
 	if got := status(http.MethodGet, "/metrics", nil); got != http.StatusNotFound {
