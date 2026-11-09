@@ -71,6 +71,7 @@ finally {
 
 Copy-Item -LiteralPath $ArchivePath -Destination (Join-Path $StagingDir 'postgres.zip')
 Copy-Item -LiteralPath (Join-Path $RepoRoot 'docs\demo-quickstart.md') -Destination (Join-Path $StagingDir 'QUICKSTART.md')
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $StagingDir 'THIRD-PARTY-NOTICES.txt')
 
 Get-ChildItem -LiteralPath $StagingDir -Recurse | ForEach-Object {
     $_.LastWriteTimeUtc = $FixedTimestamp
@@ -86,7 +87,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.CompressionLevel]::NoCompression,
     $false)
 
-$expected = @('platform.exe', 'policy-example.exe', 'postgres.zip', 'QUICKSTART.md')
+$expected = @('platform.exe', 'policy-example.exe', 'postgres.zip', 'QUICKSTART.md', 'THIRD-PARTY-NOTICES.txt')
 $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
 try {
     $names = @($zip.Entries | ForEach-Object { $_.FullName })

@@ -7,5 +7,6 @@ import (
 )
 
 func runSeed(w io.Writer) error {
-	return seed.Run(w)
+	_, err := seed.Run(w)
+	return err
 }

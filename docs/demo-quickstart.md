@@ -50,3 +50,14 @@ Ctrl-C stops the stack and every child process (Postgres and the Policy).
 
 - `initdb` failing with a missing `VCRUNTIME`/`MSVCP` DLL means the Visual C++ runtime is absent. Install it from <https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist>.
 - A port already in use message means the compose stack or another process owns the port. Stop it or set the variable for that port.
+
+## Licence notices
+
+Third-party components bundled in this zip are listed in `THIRD-PARTY-NOTICES.txt`.
+
+## Verification evidence
+
+The console was accepted against a locally run stack; the step-by-step record and screenshots
+(gate, run list, detail with collapsible span groups, human review with paused polling, a 409
+conflict, a 401 returning to the gate, and an unknown run id) live in `.screenshots/` at the
+repository root and in the record on issue #39.

@@ -21,41 +21,40 @@ const (
 	defaultPolicyURL = "http://policy-example:9090"
 )
 
-type seededTenant struct {
+type Tenant struct {
 	ID     string   `json:"id"`
 	APIKey string   `json:"api_key"`
 	Agents []string `json:"agents"`
 }
 
-type seedResult struct {
-	PolicyURL string         `json:"policy_url"`
-	Tenants   []seededTenant `json:"tenants"`
+type Result struct {
+	PolicyURL string   `json:"policy_url"`
+	Tenants   []Tenant `json:"tenants"`
 }
 
-func Run(w io.Writer) error {
+func Run(w io.Writer) (Result, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 	defer pool.Close()
 	if err := migrate.Run(ctx, pool); err != nil {
-		return err
+		return Result{}, err
 	}
 	keyA, keyB, err := seedKeys()
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 	policyURL := defaultPolicyURL
 	if value := os.Getenv("POLICY_URL"); value != "" {
 		policyURL = value
 	}
-	_, err = seed(ctx, pool, policyURL, keyA, keyB, w)
-	return err
+	return seed(ctx, pool, policyURL, keyA, keyB, w)
 }
 
 func NewAPIKey() (string, error) {
@@ -83,8 +82,8 @@ func seedKeys() (string, string, error) {
 	return keyA, keyB, nil
 }
 
-func seed(ctx context.Context, pool *pgxpool.Pool, policyURL, keyA, keyB string, w io.Writer) (seedResult, error) {
-	result := seedResult{PolicyURL: policyURL, Tenants: []seededTenant{}}
+func seed(ctx context.Context, pool *pgxpool.Pool, policyURL, keyA, keyB string, w io.Writer) (Result, error) {
+	result := Result{PolicyURL: policyURL, Tenants: []Tenant{}}
 	for _, tenant := range []struct {
 		id  string
 		key string
@@ -93,23 +92,23 @@ func seed(ctx context.Context, pool *pgxpool.Pool, policyURL, keyA, keyB string,
 		{id: "demo-b", key: keyB},
 	} {
 		if err := seedTenant(ctx, pool, tenant.id, tenant.key); err != nil {
-			return seedResult{}, err
+			return Result{}, err
 		}
 		agents, err := seedAgents(ctx, pool, tenant.id, policyURL)
 		if err != nil {
-			return seedResult{}, err
+			return Result{}, err
 		}
 		if err := seedModelsAndTools(ctx, pool, tenant.id, policyURL); err != nil {
-			return seedResult{}, err
+			return Result{}, err
 		}
-		result.Tenants = append(result.Tenants, seededTenant{
+		result.Tenants = append(result.Tenants, Tenant{
 			ID:     tenant.id,
 			APIKey: tenant.key,
 			Agents: agents,
 		})
 	}
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		return seedResult{}, err
+		return Result{}, err
 	}
 	return result, nil
 }

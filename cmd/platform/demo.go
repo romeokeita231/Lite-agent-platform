@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,10 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/romeokeita231/Lite-agent-platform/internal/demo"
-	"github.com/romeokeita231/Lite-agent-platform/internal/migrate"
 	"github.com/romeokeita231/Lite-agent-platform/internal/seed"
 )
 
@@ -26,13 +21,6 @@ const (
 
 	defaultMetricsAddr = "127.0.0.1:9091"
 )
-
-type demoSeedResult struct {
-	Tenants []struct {
-		ID     string `json:"id"`
-		APIKey string `json:"api_key"`
-	} `json:"tenants"`
-}
 
 func runDemo(reset bool, w io.Writer) error {
 	secret := os.Getenv("POLICY_SECRET")
@@ -92,23 +80,12 @@ func runDemo(reset bool, w io.Writer) error {
 		}
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		return fmt.Errorf("run migrations: %w", err)
-	}
-	migrationErr := migrate.Run(ctx, pool)
-	pool.Close()
-	if migrationErr != nil {
-		return fmt.Errorf("run migrations: %w", migrationErr)
-	}
-
-	var output bytes.Buffer
-	if err := seed.Run(&output); err != nil {
-		return fmt.Errorf("seed demo data: %w", err)
-	}
-	result, err := parseDemoSeed(output.Bytes())
+	result, err := seed.Run(io.Discard)
 	if err != nil {
 		return fmt.Errorf("seed demo data: %w", err)
+	}
+	if len(result.Tenants) == 0 {
+		return errors.New("seed demo data: seed produced no tenants")
 	}
 
 	if err := supervisor.StartPolicy(ctx); err != nil {
@@ -130,17 +107,6 @@ func shutdownDemo(supervisor *demo.Supervisor) {
 	if err := supervisor.Stop(ctx); err != nil {
 		logShutdownError(err)
 	}
-}
-
-func parseDemoSeed(raw []byte) (demoSeedResult, error) {
-	var result demoSeedResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return result, err
-	}
-	if len(result.Tenants) == 0 {
-		return result, errors.New("seed produced no tenants")
-	}
-	return result, nil
 }
 
 func checkListenAddress(addr string) error {

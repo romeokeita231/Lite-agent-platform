@@ -4,7 +4,7 @@ Status: accepted
 
 观察台解决"看不见运行"，剩下的是"不用命令行准备环境"：启动一个东西，Postgres、迁移、seed、Policy、HTTP 与观察台全部就位。它必须同时兑现两个承诺，缺一个就不算数：**离线可用**，以及 **Policy 仍在独立进程里**（[ADR 0008](0008-go-for-platform-and-policy.md)）。
 
-演示分发物是一个 zip，内容是 `platform.exe`、`policy-example.exe`、`QUICKSTART.md` 与 Postgres 归档（归档 per-OS，因此分开打包）。v1 只承诺 **Windows amd64**，其他平台不承诺。首次运行不联网：`platform demo` 把归档解压到 `%LOCALAPPDATA%\LiteAgentPlatform\demo\`，起 Postgres、跑迁移与 seed，用 `os.Executable()` 定位同目录的 `policy-example.exe` 并作为子进程拉起（不按 CWD 找），最后起 HTTP 与观察台；进程退出时回收全部子进程。端口固定 8080 / 5433 / 9090，并额外绑定仅回环的指标端口 9091；8080、9090 与 9091 都与 compose 栈重合。
+演示分发物是一个 zip，内容是 `platform.exe`、`policy-example.exe`、`QUICKSTART.md`、`THIRD-PARTY-NOTICES.txt`（Postgres 与 Go 的许可证说明）与 Postgres 归档（归档 per-OS，因此分开打包）。v1 只承诺 **Windows amd64**，其他平台不承诺。首次运行不联网：`platform demo` 把归档解压到 `%LOCALAPPDATA%\LiteAgentPlatform\demo\`，起 Postgres、跑迁移与 seed，用 `os.Executable()` 定位同目录的 `policy-example.exe` 并作为子进程拉起（不按 CWD 找），最后起 HTTP 与观察台；进程退出时回收全部子进程。端口固定 8080 / 5433 / 9090，并额外绑定仅回环的指标端口 9091；8080、9090 与 9091 都与 compose 栈重合。
 
 ## Considered Options
 

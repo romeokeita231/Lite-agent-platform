@@ -151,7 +151,7 @@ powershell -File scripts/demo-3-crash.ps1
 
 ## Demo zip
 
-`scripts/build-demo.ps1` builds a self-contained Windows amd64 demo zip. It is a demo distribution, not the production delivery form: production stays one platform binary plus policy and Postgres containers ([ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)). The zip root contains `platform.exe`, `policy-example.exe`, `postgres.zip` (a pinned EDB Postgres 16.4 archive) and `QUICKSTART.md`.
+`scripts/build-demo.ps1` builds a self-contained Windows amd64 demo zip. It is a demo distribution, not the production delivery form: production stays one platform binary plus policy and Postgres containers ([ADR 0027](docs/adr/0027-demo-zip-not-a-delivery-form.md)). The zip root contains `platform.exe`, `policy-example.exe`, `postgres.zip` (a pinned EDB Postgres 16.4 archive), `QUICKSTART.md` and `THIRD-PARTY-NOTICES.txt`.
 
 ```powershell
 powershell -File scripts/build-demo.ps1

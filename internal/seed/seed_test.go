@@ -50,7 +50,7 @@ func TestSeedIsIdempotentAndStoresHashedKeys(t *testing.T) {
 	if len(result.Tenants) != 2 || result.PolicyURL != policyURL {
 		t.Fatalf("seed result = %+v", result)
 	}
-	var decoded seedResult
+	var decoded Result
 	if err := json.Unmarshal(first.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode seed output %q: %v", first.String(), err)
 	}
