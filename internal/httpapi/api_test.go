@@ -54,7 +54,7 @@ func newAPI(t *testing.T) *apiEnv {
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, nil))
+	env2.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}))
 	t.Cleanup(env2.srv.Close)
 	return env2
 }
@@ -518,6 +518,198 @@ func TestToolDefaultVersionIsExclusiveAndUsedByInvoke(t *testing.T) {
 		 values ('tenant-a', 'lookup', '3', '{}', 'http://example', true)`)
 	if err == nil {
 		t.Fatalf("database allowed a second default version for the same tool")
+	}
+}
+
+func createAgentForTenant(t *testing.T, api *apiEnv, tenant, name string) domain.Agent {
+	t.Helper()
+	status, raw := api.do(t, http.MethodPost, "/v1/agents", tenant, map[string]string{
+		"name":       name,
+		"policy_url": "http://policy-" + name,
+		"secret_env": "POLICY_SECRET_" + name,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create agent %s status = %d body=%s", name, status, raw)
+	}
+	var agent domain.Agent
+	if err := json.Unmarshal(raw, &agent); err != nil {
+		t.Fatalf("decode agent %s: %v", name, err)
+	}
+	return agent
+}
+
+func createRunForAgent(t *testing.T, api *apiEnv, tenant, agentID string) domain.Run {
+	t.Helper()
+	status, raw := api.do(t, http.MethodPost, "/v1/runs", tenant, map[string]any{
+		"agent_id": agentID,
+		"input":    map[string]string{"order_id": "A1"},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create run for %s status = %d body=%s", tenant, status, raw)
+	}
+	var run domain.Run
+	if err := json.Unmarshal(raw, &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	return run
+}
+
+type runListBody struct {
+	Runs   []domain.Run     `json:"runs"`
+	Counts map[string]int64 `json:"counts"`
+}
+
+func decodeRunList(t *testing.T, raw []byte) runListBody {
+	t.Helper()
+	var body runListBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode run list %s: %v", raw, err)
+	}
+	return body
+}
+
+func TestRunListIsTenantScopedFilteredAndCounted(t *testing.T) {
+	api := newAPI(t)
+	agentA1 := createAgentForTenant(t, api, "tenant-a", "alpha")
+	agentA2 := createAgentForTenant(t, api, "tenant-a", "beta")
+	agentB := createAgentForTenant(t, api, "tenant-b", "gamma")
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seed := []struct {
+		tenant string
+		agent  string
+		status domain.RunStatus
+		offset time.Duration
+	}{
+		{"tenant-a", agentA1.ID, domain.RunQueued, time.Minute},
+		{"tenant-a", agentA1.ID, domain.RunCompleted, 2 * time.Minute},
+		{"tenant-a", agentA2.ID, domain.RunRunning, 3 * time.Minute},
+		{"tenant-b", agentB.ID, domain.RunFailed, 4 * time.Minute},
+	}
+	created := make([]domain.Run, len(seed))
+	for i, item := range seed {
+		created[i] = createRunForAgent(t, api, item.tenant, item.agent)
+		if _, err := api.env.Pool.Exec(context.Background(),
+			`update runs set status = $2, created_at = $3, updated_at = $3 where id::text = $1`,
+			created[i].ID, string(item.status), base.Add(item.offset)); err != nil {
+			t.Fatalf("stamp run %d: %v", i, err)
+		}
+	}
+
+	status, raw := api.do(t, http.MethodGet, "/v1/runs", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list runs status = %d body=%s", status, raw)
+	}
+	body := decodeRunList(t, raw)
+	if len(body.Runs) != 3 {
+		t.Fatalf("tenant a runs = %+v", body.Runs)
+	}
+	wantOrder := []string{created[2].ID, created[1].ID, created[0].ID}
+	for i, id := range wantOrder {
+		if body.Runs[i].ID != id || body.Runs[i].TenantID != "tenant-a" {
+			t.Fatalf("run %d = %+v, want id %s", i, body.Runs[i], id)
+		}
+	}
+	wantCounts := map[string]int64{
+		"queued":        1,
+		"completed":     1,
+		"running":       1,
+		"failed":        0,
+		"waiting_human": 0,
+		"cancelled":     0,
+	}
+	for name, expected := range wantCounts {
+		if body.Counts[name] != expected {
+			t.Fatalf("counts[%s] = %d, want %d (counts=%+v)", name, body.Counts[name], expected, body.Counts)
+		}
+	}
+	if len(body.Counts) != len(wantCounts) {
+		t.Fatalf("counts keys = %+v", body.Counts)
+	}
+	if !bytes.Contains(raw, []byte(`"output":null`)) {
+		t.Fatalf("run list lacks run fields: %s", raw)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs?status=completed", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list completed status = %d body=%s", status, raw)
+	}
+	body = decodeRunList(t, raw)
+	if len(body.Runs) != 1 || body.Runs[0].ID != created[1].ID {
+		t.Fatalf("completed runs = %+v", body.Runs)
+	}
+	if body.Counts["queued"] != 1 || body.Counts["running"] != 1 {
+		t.Fatalf("status filter changed counts = %+v", body.Counts)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs?agent_id="+agentA1.ID, "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list agent runs status = %d body=%s", status, raw)
+	}
+	body = decodeRunList(t, raw)
+	if len(body.Runs) != 2 || body.Runs[0].ID != created[1].ID || body.Runs[1].ID != created[0].ID {
+		t.Fatalf("agent runs = %+v", body.Runs)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs?status=queued&agent_id="+agentA1.ID, "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list filtered runs status = %d body=%s", status, raw)
+	}
+	body = decodeRunList(t, raw)
+	if len(body.Runs) != 1 || body.Runs[0].ID != created[0].ID {
+		t.Fatalf("filtered runs = %+v", body.Runs)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs?limit=2", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list limited status = %d body=%s", status, raw)
+	}
+	body = decodeRunList(t, raw)
+	if len(body.Runs) != 2 || body.Runs[0].ID != created[2].ID || body.Runs[1].ID != created[1].ID {
+		t.Fatalf("limited runs = %+v", body.Runs)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs?status=cancelled", "tenant-a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list empty status = %d body=%s", status, raw)
+	}
+	if body = decodeRunList(t, raw); len(body.Runs) != 0 || body.Runs == nil {
+		t.Fatalf("empty runs = %#v", body.Runs)
+	}
+
+	status, raw = api.do(t, http.MethodGet, "/v1/runs", "tenant-b", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list tenant b status = %d body=%s", status, raw)
+	}
+	body = decodeRunList(t, raw)
+	if len(body.Runs) != 1 || body.Runs[0].ID != created[3].ID {
+		t.Fatalf("tenant b runs = %+v", body.Runs)
+	}
+	if body.Counts["failed"] != 1 || body.Counts["queued"] != 0 || body.Counts["completed"] != 0 {
+		t.Fatalf("tenant b counts = %+v", body.Counts)
+	}
+
+	for _, query := range []string{
+		"?status=done",
+		"?status=RUNNING",
+		"?limit=0",
+		"?limit=-1",
+		"?limit=101",
+		"?limit=abc",
+	} {
+		status, raw := api.do(t, http.MethodGet, "/v1/runs"+query, "tenant-a", nil)
+		if status != http.StatusBadRequest {
+			t.Fatalf("%s status = %d body=%s", query, status, raw)
+		}
+		if errBody := decodeError(t, raw); errBody.Error != "bad_request" {
+			t.Fatalf("%s body = %+v", query, errBody)
+		}
+	}
+
+	if status, raw := api.do(t, http.MethodGet, "/v1/runs", "", nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list status = %d body=%s", status, raw)
+	} else if errBody := decodeError(t, raw); errBody.Error != "unauthorized" {
+		t.Fatalf("unauthenticated list body = %+v", errBody)
 	}
 }
 

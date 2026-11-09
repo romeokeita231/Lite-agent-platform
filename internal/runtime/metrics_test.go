@@ -100,7 +100,7 @@ func TestMetricsEndpointExposesContract(t *testing.T) {
 	}
 
 	want := runStatusCounts(t, e, foldRun.ID, toolRun.ID)
-	samples := waitMetricsSamples(t, e.srv.URL+"/metrics", want)
+	samples := waitMetricsSamples(t, e.metricsSrv.URL+"/metrics", want)
 
 	families := []string{
 		"platform_runs",

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platform Console</title>
+<link rel="stylesheet" href="/console/static/styles.css">
+</head>
+<body>
+<header class="bar">
+  <h1>Platform Console</h1>
+  <div class="health">
+    <span class="pill" data-probe="/healthz">healthz <b>unknown</b></span>
+    <span class="pill" data-probe="/readyz">readyz <b>unknown</b></span>
+  </div>
+  <button id="change-key" type="button" hidden>Change key</button>
+</header>
+<main>
+  <section id="gate">
+    <h2>Connect</h2>
+    <p>The tenant API key stays in this browser's localStorage and is sent as an Authorization header. It never appears in a URL.</p>
+    <form id="gate-form">
+      <input id="key-input" type="password" autocomplete="off" spellcheck="false" placeholder="Tenant API key" required>
+      <button type="submit">Open console</button>
+    </form>
+    <p id="gate-error" class="error" role="alert"></p>
+  </section>
+  <section id="checking" hidden>Checking key…</section>
+  <section id="shell" hidden>
+    <div class="layout">
+      <section class="panel">
+        <h2>Runs</h2>
+        <div class="filters">
+          <label>Status
+            <select id="status-filter">
+              <option value="">any</option>
+              <option value="queued">queued</option>
+              <option value="running">running</option>
+              <option value="waiting_human">waiting_human</option>
+              <option value="completed">completed</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </label>
+          <label>Agent
+            <select id="agent-filter">
+              <option value="">any agent</option>
+            </select>
+          </label>
+        </div>
+        <div id="run-counts" class="counts"></div>
+        <p id="list-error" class="error" role="alert"></p>
+        <table class="runs">
+          <thead>
+            <tr><th>Created</th><th>Agent</th><th>Status</th><th>Attempt</th></tr>
+          </thead>
+          <tbody id="run-list"></tbody>
+        </table>
+        <p id="list-empty" class="placeholder" hidden>No runs match these filters.</p>
+      </section>
+      <section class="panel">
+        <h2>Run detail</h2>
+        <p id="detail-empty" class="placeholder">Select a run to inspect it.</p>
+        <div id="detail" hidden>
+          <dl class="facts">
+            <dt>Status</dt>
+            <dd><span id="detail-status" class="status"></span></dd>
+            <dt>Terminal reason</dt>
+            <dd id="detail-terminal-reason"></dd>
+            <dt>Pending step</dt>
+            <dd><pre id="detail-pending-step"></pre></dd>
+          </dl>
+          <form id="human-form" class="human" hidden>
+            <h3>Human Review</h3>
+            <p id="human-prompt" class="prompt"></p>
+            <label for="human-input">Response (JSON)</label>
+            <textarea id="human-input" rows="4" spellcheck="false"></textarea>
+            <button id="human-submit" type="submit">Submit response</button>
+            <p id="human-error" class="error" role="alert"></p>
+          </form>
+          <h3>Checkpoints</h3>
+          <ol id="checkpoint-list" class="checkpoints"></ol>
+          <h3>Spans</h3>
+          <div id="trace-list" class="trace"></div>
+        </div>
+        <p id="detail-error" class="error" role="alert"></p>
+      </section>
+    </div>
+  </section>
+</main>
+<script src="/console/static/app.js"></script>
+</body>
+</html>

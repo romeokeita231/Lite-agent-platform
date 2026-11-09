@@ -125,6 +125,7 @@ type env struct {
 	gateway        domain.ModelGateway
 	tools          domain.ToolGateway
 	metrics        *observability.Metrics
+	metricsSrv     *httptest.Server
 	options        agentruntime.Options
 	stopDispatcher func()
 }
@@ -203,8 +204,10 @@ func newEnvWithRuntimeOptions(t *testing.T, base *testutil.Env, store *repositor
 			t.Fatalf("create tenant %s: %v", tenantID, err)
 		}
 	}
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}, metrics.Handler(), gateway))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, tools, alwaysReady{}, gateway))
 	t.Cleanup(e.srv.Close)
+	e.metricsSrv = httptest.NewServer(metrics.Handler())
+	t.Cleanup(e.metricsSrv.Close)
 
 	e.startDispatcher(t)
 	return e

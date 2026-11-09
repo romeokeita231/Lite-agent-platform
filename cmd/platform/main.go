@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,6 +23,7 @@ import (
 	"github.com/romeokeita231/Lite-agent-platform/internal/observability"
 	"github.com/romeokeita231/Lite-agent-platform/internal/repository"
 	agentruntime "github.com/romeokeita231/Lite-agent-platform/internal/runtime"
+	"github.com/romeokeita231/Lite-agent-platform/internal/seed"
 	"github.com/romeokeita231/Lite-agent-platform/internal/toolgw"
 )
 
@@ -48,21 +47,28 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "demo" {
+		reset := false
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--reset":
+				reset = true
+			default:
+				log.Fatalf("platform demo: unknown argument %q", arg)
+			}
+		}
+		if err := runDemo(reset, os.Stdout); err != nil {
+			log.Fatalf("platform demo: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("platform: %v", err)
 	}
 }
 
-func newAPIKey() (string, error) {
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(raw[:]), nil
-}
-
 func keygen(w io.Writer) error {
-	apiKey, err := newAPIKey()
+	apiKey, err := seed.NewAPIKey()
 	if err != nil {
 		return err
 	}
@@ -122,11 +128,20 @@ func run() error {
 		}
 	}()
 
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, metrics.Handler(), gateway)}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", metrics.Handler())
+	metricsServer := &http.Server{Addr: cfg.MetricsAddr, Handler: metricsMux}
+
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewMux(ready, store, tools, ready, gateway)}
 
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.ListenAndServe()
+	}()
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("metrics listener on %s failed: %v", cfg.MetricsAddr, err)
+		}
 	}()
 	go maint.loop(ctx, maintenanceInterval)
 
@@ -154,6 +169,9 @@ func run() error {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown metrics: %v", err)
 	}
 	return nil
 }

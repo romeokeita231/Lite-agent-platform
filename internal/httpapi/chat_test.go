@@ -83,7 +83,7 @@ func newModelAPI(t *testing.T, upstreamURL string, budget time.Duration) *apiEnv
 		}
 	}
 	gateway := modelgw.NewWithStore(store, upstreamURL, "", budget)
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, nil, gateway))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, gateway))
 	t.Cleanup(e.srv.Close)
 	return e
 }

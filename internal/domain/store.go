@@ -14,6 +14,8 @@ type Store interface {
 	ListAgents(ctx context.Context) ([]Agent, error)
 	GetAgent(ctx context.Context, id string) (Agent, error)
 	CreateRun(ctx context.Context, run Run) (Run, error)
+	ListRuns(ctx context.Context, status RunStatus, agentID string, limit int) ([]Run, error)
+	CountTenantRunsByStatus(ctx context.Context) (map[RunStatus]int64, error)
 	GetRun(ctx context.Context, id string) (Run, error)
 	GetSteps(ctx context.Context, runID string) ([]Checkpoint, error)
 	ListSpans(ctx context.Context, runID string) ([]Span, error)

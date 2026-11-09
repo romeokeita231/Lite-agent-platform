@@ -12,6 +12,9 @@ data/
 /bin/
 *.exe
 
+# build outputs
+dist/
+
 # editors / os
 .vscode/
 .idea/

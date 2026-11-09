@@ -1,0 +1,67 @@
+Lite agent platform demo — third-party notices
+==============================================
+
+This demo distribution bundles the following third-party components.
+
+
+PostgreSQL 16.4 (Windows x64 binaries)
+--------------------------------------
+Source: https://get.enterprisedb.com/postgresql/postgresql-16.4-1-windows-x64-binaries.zip
+Bundled as postgres.zip; the platform demo extracts it into its data directory at first run.
+
+PostgreSQL Database Management System
+(formerly known as Postgres, then as Postgres95)
+
+Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+Portions Copyright (c) 1994, The Regents of the University of California
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose, without fee, and without a written agreement
+is hereby granted, provided that the above copyright notice and this
+paragraph and the following two paragraphs appear in all copies.
+
+IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR
+DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING
+LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS
+DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS
+ON AN "AS IS" BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO
+PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+
+Third-party components inside the bundled PostgreSQL distribution
+-----------------------------------------------------------------
+postgres.zip is a trimmed copy of the EDB Windows x64 binary distribution of PostgreSQL 16.4:
+it keeps pgsql/bin, pgsql/lib and pgsql/share (without the locale translations) and drops
+pgAdmin 4, StackBuilder, symbols, include and doc. Besides PostgreSQL itself it ships these
+components, each under its own licence:
+
+  icu*67.dll            ICU            Unicode licence
+  libcrypto-3-x64.dll   OpenSSL        Apache-2.0
+  libssl-3-x64.dll      OpenSSL        Apache-2.0
+  libiconv-2.dll        GNU libiconv   LGPL-2.1
+  libintl-9.dll         GNU gettext    LGPL-2.1
+  libxml2.dll           libxml2        MIT
+  libxslt.dll           libxslt        MIT
+  liblz4.dll            LZ4            BSD-2-Clause
+  libzstd.dll           Zstandard      BSD-3-Clause / GPL-2.0
+  zlib1.dll             zlib           zlib licence
+  libwinpthread-1.dll   mingw-w64      permissive
+
+The archive carries no separate notice files for these components. The PostgreSQL licence is
+restated in full above; for the others the authoritative texts are:
+https://www.openssl.org/source/license.html ,
+https://unicode-org.github.io/icu/userguide/icu4c/#icu-license ,
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html .
+If you redistribute this demo, keep this file alongside it.
+
+
+Go runtime
+----------
+platform.exe and policy-example.exe are Go programs and therefore contain the
+Go runtime and standard library, distributed under the BSD 3-Clause licence:
+https://go.dev/LICENSE

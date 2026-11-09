@@ -119,7 +119,7 @@ func newTraceEnv(t *testing.T, upstreamURL string) *apiEnv {
 		cancel()
 		<-done
 	})
-	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, nil, gateway))
+	e.srv = httptest.NewServer(httpapi.NewMux(alwaysReady{}, store, toolgw.New(store, 2*time.Second), alwaysReady{}, gateway))
 	t.Cleanup(e.srv.Close)
 	return e
 }
