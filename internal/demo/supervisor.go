@@ -307,7 +307,7 @@ func (s *Supervisor) initDatabaseIfNeeded(ctx context.Context, pgdata string, db
 	spec := ChildSpec{
 		Name:    "initdb",
 		Path:    filepath.Join(s.postgresBin, binaryName("initdb")),
-		Args:    []string{"-D", pgdata, "-U", db.user, "-A", "trust", "-E", "UTF8"},
+		Args:    []string{"-D", pgdata, "-U", db.user, "-A", "trust", "-E", "UTF8", "--locale=C"},
 		Dir:     s.dataDir,
 		Env:     []string{},
 		LogPath: filepath.Join(s.dataDir, "logs", "initdb.log"),
