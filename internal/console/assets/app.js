@@ -19,8 +19,19 @@ var runCounts = document.getElementById("run-counts");
 var listError = document.getElementById("list-error");
 var listEmpty = document.getElementById("list-empty");
 
+var detailEmpty = document.getElementById("detail-empty");
+var detail = document.getElementById("detail");
+var detailStatus = document.getElementById("detail-status");
+var detailTerminalReason = document.getElementById("detail-terminal-reason");
+var detailPendingStep = document.getElementById("detail-pending-step");
+var checkpointList = document.getElementById("checkpoint-list");
+var traceList = document.getElementById("trace-list");
+var detailError = document.getElementById("detail-error");
+
 var active = false;
 var listInFlight = false;
+var detailInFlight = false;
+var selectedRunID = "";
 var agentLabels = {};
 
 function agentLabel(id) {
@@ -36,6 +47,16 @@ function formatTime(value) {
     return String(value);
   }
   return date.toLocaleString();
+}
+
+function formatJSON(value) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
 }
 
 function addCell(row, text) {
@@ -218,6 +239,12 @@ function renderRuns(runs) {
   runs.forEach(function (run) {
     var row = document.createElement("tr");
     row.setAttribute("data-run-id", run.id);
+    if (run.id === selectedRunID) {
+      row.className = "selected";
+    }
+    row.addEventListener("click", function () {
+      selectRun(run.id);
+    });
     addCell(row, formatTime(run.created_at));
     addCell(row, agentLabel(run.agent_id));
     var statusCell = document.createElement("td");
@@ -263,6 +290,159 @@ function loadAgents() {
   });
 }
 
+function selectRun(id) {
+  var same = selectedRunID === id;
+  selectedRunID = id;
+  detailEmpty.hidden = true;
+  detailEmpty.textContent = "Select a run to inspect it.";
+  detail.hidden = false;
+  detailError.textContent = "";
+  if (!same) {
+    resetDetail();
+  }
+  pollDetail();
+}
+
+function resetDetail() {
+  detailStatus.textContent = "";
+  detailStatus.className = "status";
+  detailTerminalReason.textContent = "";
+  detailPendingStep.textContent = "";
+  checkpointList.textContent = "";
+  traceList.textContent = "";
+}
+
+function fetchDetailJSON(path) {
+  return apiFetch(path).then(function (response) {
+    if (response.status !== 200) {
+      return { status: response.status };
+    }
+    return response.json().then(function (body) {
+      return { status: 200, body: body };
+    }, function () {
+      return { status: 200, body: null };
+    });
+  });
+}
+
+function pollDetail() {
+  if (!active || detailInFlight || !selectedRunID) {
+    return;
+  }
+  var id = selectedRunID;
+  detailInFlight = true;
+  Promise.all([
+    fetchDetailJSON("/v1/runs/" + encodeURIComponent(id)),
+    fetchDetailJSON("/v1/runs/" + encodeURIComponent(id) + "/steps"),
+    fetchDetailJSON("/v1/runs/" + encodeURIComponent(id) + "/trace")
+  ]).then(function (results) {
+    if (id !== selectedRunID) {
+      return;
+    }
+    var run = results[0];
+    if (run.status === 401) {
+      return;
+    }
+    if (run.status === 404) {
+      detail.hidden = true;
+      detailEmpty.hidden = false;
+      detailEmpty.textContent = "run not found";
+      detailError.textContent = "";
+      return;
+    }
+    if (run.status !== 200 || !run.body) {
+      detailError.textContent = "run detail failed with status " + run.status;
+      return;
+    }
+    detailError.textContent = "";
+    renderFacts(run.body);
+    renderCheckpoints(results[1].status === 200 && results[1].body ? results[1].body : []);
+    renderTrace(results[2].status === 200 && results[2].body ? results[2].body : null);
+  }).catch(function (err) {
+    detailError.textContent = err && err.message ? err.message : "run detail request failed";
+  }).then(function () {
+    detailInFlight = false;
+  });
+}
+
+function renderFacts(run) {
+  detailStatus.textContent = run.status || "";
+  detailStatus.className = "status status-" + (run.status || "");
+  detailTerminalReason.textContent = run.terminal_reason ? String(run.terminal_reason) : "—";
+  detailPendingStep.textContent = formatJSON(run.pending_step);
+}
+
+function renderCheckpoints(steps) {
+  checkpointList.textContent = "";
+  if (!steps.length) {
+    var empty = document.createElement("li");
+    empty.className = "placeholder";
+    empty.textContent = "No checkpoints yet.";
+    checkpointList.appendChild(empty);
+    return;
+  }
+  steps.forEach(function (step) {
+    var item = document.createElement("li");
+    var head = document.createElement("div");
+    head.className = "checkpoint-head";
+    head.textContent = "Step " + step.step_index + " · " + step.step_type + " · " + formatTime(step.created_at);
+    item.appendChild(head);
+    var body = document.createElement("pre");
+    body.textContent = formatJSON(step.result);
+    item.appendChild(body);
+    checkpointList.appendChild(item);
+  });
+}
+
+function renderTrace(trace) {
+  traceList.textContent = "";
+  var steps = trace && trace.steps ? trace.steps : [];
+  if (!steps.length) {
+    var empty = document.createElement("p");
+    empty.className = "placeholder";
+    empty.textContent = "No spans yet.";
+    traceList.appendChild(empty);
+    return;
+  }
+  steps.forEach(function (step) {
+    var group = document.createElement("details");
+    group.className = "trace-step";
+    group.open = true;
+    var summary = document.createElement("summary");
+    summary.textContent = "Step " + step.step_index + " · " + step.spans.length + " span(s)";
+    group.appendChild(summary);
+    step.spans.forEach(function (span) {
+      var row = document.createElement("div");
+      row.className = span.error ? "span span-error" : "span";
+      var title = document.createElement("div");
+      title.className = "span-title";
+      var name = document.createElement("b");
+      name.textContent = span.name;
+      title.appendChild(name);
+      var attempt = document.createElement("span");
+      attempt.className = "attempt";
+      attempt.textContent = "attempt " + span.attempt;
+      title.appendChild(attempt);
+      row.appendChild(title);
+      var meta = document.createElement("div");
+      meta.className = "span-meta";
+      meta.textContent = formatTime(span.started_at) + " → " + formatTime(span.ended_at);
+      row.appendChild(meta);
+      if (span.error) {
+        var errorLine = document.createElement("div");
+        errorLine.className = "span-meta";
+        errorLine.textContent = span.error;
+        row.appendChild(errorLine);
+      }
+      var attributes = document.createElement("pre");
+      attributes.textContent = formatJSON(span.attributes);
+      row.appendChild(attributes);
+      group.appendChild(row);
+    });
+    traceList.appendChild(group);
+  });
+}
+
 statusFilter.addEventListener("change", pollList);
 agentFilter.addEventListener("change", pollList);
 
@@ -289,3 +469,4 @@ if (getKey()) {
 probeHealth();
 window.setInterval(probeHealth, HEALTH_INTERVAL_MS);
 window.setInterval(pollList, RUN_POLL_MS);
+window.setInterval(pollDetail, RUN_POLL_MS);

@@ -212,6 +212,112 @@ main {
   color: var(--bad);
 }
 
+.runs tbody tr {
+  cursor: pointer;
+}
+
+.runs tbody tr:hover {
+  background: #f4f7fb;
+}
+
+.runs tbody tr.selected {
+  background: #e8f0fc;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.panel h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+pre {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8f9fb;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.checkpoints {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+}
+
+.checkpoints li {
+  margin-bottom: 0.5rem;
+}
+
+.checkpoint-head {
+  margin-bottom: 0.15rem;
+  color: var(--muted);
+}
+
+.trace-step {
+  margin-bottom: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.trace-step summary {
+  cursor: pointer;
+}
+
+.span {
+  margin-top: 0.35rem;
+  padding: 0.35rem 0 0.35rem 0.4rem;
+  border-top: 1px solid var(--border);
+}
+
+.span-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.attempt {
+  padding: 0 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.span-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.span-error .span-title b {
+  color: var(--bad);
+}
+
+.layout > .panel {
+  min-width: 0;
+}
+
 #gate, #checking {
   max-width: 34rem;
 }

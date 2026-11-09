@@ -96,6 +96,34 @@ func TestConsoleRunListWiresFiltersCountsAndPolling(t *testing.T) {
 	}
 }
 
+func TestConsoleRunDetailWiresStepsAndTrace(t *testing.T) {
+	h := console.Handler()
+	status, _, index := get(t, h, "/console")
+	if status != http.StatusOK {
+		t.Fatalf("GET /console = %d, want 200", status)
+	}
+	for _, want := range []string{
+		`id="detail-status"`, `id="detail-terminal-reason"`, `id="detail-pending-step"`,
+		`id="checkpoint-list"`, `id="trace-list"`,
+	} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("index is missing %q", want)
+		}
+	}
+
+	status, _, script := get(t, h, "/console/static/app.js")
+	if status != http.StatusOK {
+		t.Fatalf("GET app.js = %d, want 200", status)
+	}
+	for _, want := range []string{
+		"/v1/runs/", "/steps", "/trace", "step_index", "attempt", "pollDetail",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("app.js is missing %q", want)
+		}
+	}
+}
+
 func TestUnknownConsolePathsReturn404(t *testing.T) {
 	h := console.Handler()
 	for _, path := range []string{
