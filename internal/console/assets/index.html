@@ -30,7 +30,33 @@
     <div class="layout">
       <section class="panel">
         <h2>Runs</h2>
-        <p class="placeholder">The tenant run list is added by a later change.</p>
+        <div class="filters">
+          <label>Status
+            <select id="status-filter">
+              <option value="">any</option>
+              <option value="queued">queued</option>
+              <option value="running">running</option>
+              <option value="waiting_human">waiting_human</option>
+              <option value="completed">completed</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </label>
+          <label>Agent
+            <select id="agent-filter">
+              <option value="">any agent</option>
+            </select>
+          </label>
+        </div>
+        <div id="run-counts" class="counts"></div>
+        <p id="list-error" class="error" role="alert"></p>
+        <table class="runs">
+          <thead>
+            <tr><th>Created</th><th>Agent</th><th>Status</th><th>Attempt</th></tr>
+          </thead>
+          <tbody id="run-list"></tbody>
+        </table>
+        <p id="list-empty" class="placeholder" hidden>No runs match these filters.</p>
       </section>
       <section class="panel">
         <h2>Run detail</h2>

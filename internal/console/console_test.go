@@ -65,6 +65,37 @@ func TestStaticAssetsAreEmbedded(t *testing.T) {
 	}
 }
 
+func TestConsoleRunListWiresFiltersCountsAndPolling(t *testing.T) {
+	h := console.Handler()
+	status, _, index := get(t, h, "/console")
+	if status != http.StatusOK {
+		t.Fatalf("GET /console = %d, want 200", status)
+	}
+	for _, want := range []string{`id="status-filter"`, `id="agent-filter"`, `id="run-list"`, `id="run-counts"`} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("index is missing %q", want)
+		}
+	}
+	for _, status := range []string{"queued", "running", "waiting_human", "completed", "failed", "cancelled"} {
+		if !strings.Contains(index, `value="`+status+`"`) {
+			t.Fatalf("status filter is missing %q", status)
+		}
+	}
+
+	status, _, script := get(t, h, "/console/static/app.js")
+	if status != http.StatusOK {
+		t.Fatalf("GET app.js = %d, want 200", status)
+	}
+	for _, want := range []string{"/v1/runs?", "agent_id=", "/v1/agents", "RUN_POLL_MS = 1000", "counts"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("app.js is missing %q", want)
+		}
+	}
+	if strings.Contains(index+script, "/metrics") {
+		t.Fatalf("the console must not read /metrics")
+	}
+}
+
 func TestUnknownConsolePathsReturn404(t *testing.T) {
 	h := console.Handler()
 	for _, path := range []string{

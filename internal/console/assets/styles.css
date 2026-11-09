@@ -112,6 +112,106 @@ main {
   }
 }
 
+.filters {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.filters label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.filters select {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+}
+
+.counts {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+
+.count {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: #f8f9fb;
+}
+
+.count b {
+  color: #18202c;
+}
+
+.runs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.runs th,
+.runs td {
+  padding: 0.4rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.runs th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.runs tbody:empty {
+  display: none;
+}
+
+.status {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  background: #f8f9fb;
+}
+
+.status-queued {
+  color: #7a5a00;
+}
+
+.status-running {
+  color: #0b5cad;
+}
+
+.status-waiting_human {
+  color: #8a2f9c;
+}
+
+.status-completed {
+  color: var(--ok);
+}
+
+.status-failed,
+.status-cancelled {
+  color: var(--bad);
+}
+
 #gate, #checking {
   max-width: 34rem;
 }
