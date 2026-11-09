@@ -192,7 +192,7 @@ func (s *Supervisor) StartDatabase(ctx context.Context) (string, error) {
 		s.abort(ctx)
 		return "", stepFailure("start database",
 			fmt.Sprintf("port %d is already in use by another process", db.port),
-			"stop the process using it (the compose stack uses ports 8080 and 9090) or set DATABASE_URL to a different port")
+			"stop the process using it or set DATABASE_URL to a different port")
 	}
 	pgdata := filepath.Join(s.dataDir, "data")
 	if err := s.initDatabaseIfNeeded(ctx, pgdata, db); err != nil {
@@ -567,7 +567,7 @@ func tcpProbe(ctx context.Context, spec ChildSpec) error {
 
 func isVCRuntimeFailure(err error) bool {
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"vcruntime", "msvcp", "api-ms-win-crt", "code execution cannot proceed", "0xc0000135", "3221225781"} {
+	for _, marker := range []string{"vcruntime", "msvcp", "api-ms-win-crt", "code execution cannot proceed", "0xc0000135", "3221225781", "the specified module could not be found"} {
 		if strings.Contains(message, marker) {
 			return true
 		}

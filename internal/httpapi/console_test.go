@@ -48,8 +48,19 @@ func TestConsoleShellDoesNotRequireAuth(t *testing.T) {
 	if got := status(http.MethodGet, "/console/does-not-exist", nil); got != http.StatusNotFound {
 		t.Fatalf("GET /console/does-not-exist = %d, want 404", got)
 	}
-	if got := status(http.MethodGet, "/v1/runs", nil); got != http.StatusUnauthorized {
-		t.Fatalf("GET /v1/runs without bearer = %d, want 401", got)
+	runID := "run_missing"
+	routes := []string{
+		"/v1/runs",
+		"/v1/agents",
+		"/v1/models",
+		"/v1/runs/" + runID,
+		"/v1/runs/" + runID + "/steps",
+		"/v1/runs/" + runID + "/trace",
+	}
+	for _, route := range routes {
+		if got := status(http.MethodGet, route, nil); got != http.StatusUnauthorized {
+			t.Fatalf("GET %s without bearer = %d, want 401", route, got)
+		}
 	}
 	if got := status(http.MethodGet, "/metrics", nil); got != http.StatusNotFound {
 		t.Fatalf("GET /metrics on the business port = %d, want 404", got)

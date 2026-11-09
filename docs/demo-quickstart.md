@@ -34,7 +34,7 @@ Open the console URL and paste one of the tenant keys. The console is read-only;
 | `METRICS_ADDR` | `127.0.0.1:9091` | Prometheus metrics listener |
 | `DEMO_DATA_DIR` | `%LOCALAPPDATA%\LiteAgentPlatform\demo` | Data directory and logs |
 
-Ports 8080, 5433 and 9090 are the same ones the compose stack uses, so the demo and `docker compose` are mutually exclusive. Set the variables above to move the ports instead.
+Ports 8080, 9090 and the loopback metrics port 9091 are the same ones the compose stack uses, so the demo and `docker compose` are mutually exclusive. The database port 5433 is not used by compose. Set the variables above to move the ports instead.
 
 ## Reset and stop
 

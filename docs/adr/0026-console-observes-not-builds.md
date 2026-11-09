@@ -18,7 +18,7 @@ Status: accepted
 
 ## Consequences
 
-- `/metrics` 整体不进页面。它是进程级、无鉴权的运维面（`internal/httpapi/router.go:49-51`，与 `/healthz` 同级），不是租户数据面；页面不去读它。`platform_runs` 只带 status 标签、`platform_tenant_inflight` 是没有标签的 Histogram（`internal/observability/metrics.go:36`、`:66`），没有任何一条指标能按租户切分，"只取不可归属的指标"这个切法在代码里不成立。租户 key 仍可直接 curl `/metrics`；给它加独立监听或鉴权是另开一条票，不是观察台的责任。
+- `/metrics` 整体不进页面。它是进程级、无鉴权的运维面（独立监听 `METRICS_ADDR`，默认 `127.0.0.1:9091`，不在业务 mux 里），不是租户数据面；页面不去读它。`platform_runs` 只带 status 标签、`platform_tenant_inflight` 是没有标签的 Histogram（`internal/observability/metrics.go:36`、`:66`），没有任何一条指标能按租户切分，"只取不可归属的指标"这个切法在代码里不成立。租户 key 仍可直接 curl `/metrics`；给它加独立监听或鉴权是另开一条票，不是观察台的责任。
 - 列表查询必须自己写 `where tenant_id = $1`，**不得复用 `CountRunsByStatus`**：它的语义是 metrics 专用、故意不带租户过滤（`internal/repository/store.go:198`，`internal/repository/counts_test.go:14` 专门在测这一点），挂到鉴权端点上就是跨租户信息泄露。
 - `runs` 现有索引 `runs_tenant_idx (tenant_id)` 与 `runs_runnable_idx (status, next_attempt_at)`（`internal/migrate/sql/0003_tenancy.sql:35`），支撑不了"最新 N 条"。需要补 `(tenant_id, created_at desc)`，以新迁移追加，不改已发布的 0003。
 - 观察台不改变 ADR 0012 的交付物：仍是 platform 一个二进制加 policy、Postgres 两个容器，只是多了一段 embed 的静态资源。

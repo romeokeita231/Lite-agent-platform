@@ -75,6 +75,14 @@ func TestPlatformDemoStartsAndStopsTheWholeStack(t *testing.T) {
 	base := "http://127.0.0.1:18080"
 	demoWaitForEndpoints(t, base, 40*time.Second)
 
+	key := demoAPIKey(t, logPath, "demo-a")
+	if got := demoAuthStatus(t, base+"/v1/agents", key); got != http.StatusOK {
+		t.Fatalf("GET /v1/agents with a tenant key = %d, want 200", got)
+	}
+	if got := demoAuthStatus(t, base+"/v1/agents", ""); got != http.StatusUnauthorized {
+		t.Fatalf("GET /v1/agents without a bearer token = %d, want 401", got)
+	}
+
 	proc := &platformProcess{cmd: cmd, log: logFile, path: logPath}
 	signalShutdown(t, proc)
 
@@ -152,6 +160,40 @@ func demoGet(target string) (int, error) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, nil
+}
+
+func demoAPIKey(t *testing.T, logPath, tenant string) string {
+	t.Helper()
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read demo log: %v", err)
+	}
+	prefix := "tenant " + tenant + " api key: "
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	t.Fatalf("demo log does not contain the API key for tenant %s:\n%s", tenant, raw)
+	return ""
+}
+
+func demoAuthStatus(t *testing.T, target, key string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", target, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }
 
 func demoWaitForFreePort(t *testing.T, addr string, timeout time.Duration) {

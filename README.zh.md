@@ -165,7 +165,7 @@ powershell -File scripts/build-demo.ps1
 .\platform.exe demo
 ```
 
-运行时**不需要** Go、Docker 或测试工具链。命令会启动自带的 Postgres、执行迁移与 seed、把 Policy 作为子进程拉起，并提供 API 与观察台。它会打印观察台地址（`http://127.0.0.1:8080/console`）以及租户 `demo-a`、`demo-b` 的 API key；把 key 粘进观察台即可。端口 8080/5433/9090 与 compose 栈相同，演示 zip 与 `docker compose` 只能二选一。
+运行时**不需要** Go、Docker 或测试工具链。命令会启动自带的 Postgres、执行迁移与 seed、把 Policy 作为子进程拉起，并提供 API 与观察台。它会打印观察台地址（`http://127.0.0.1:8080/console`）以及租户 `demo-a`、`demo-b` 的 API key；把 key 粘进观察台即可。端口 8080、9090 与仅回环的指标端口 9091 与 compose 栈相同，所以演示 zip 与 `docker compose` 只能二选一；数据库端口 5433 不被 compose 使用。
 
 可用覆盖变量：`HTTP_ADDR`、`DATABASE_URL`、`POLICY_ADDR`、`METRICS_ADDR`、`DEMO_DATA_DIR`。租户数据持久保存在 `DEMO_DATA_DIR`（默认 `%LOCALAPPDATA%\LiteAgentPlatform\demo`）；`.\platform.exe demo --reset` 会在启动前清空。Ctrl-C 会停止整个栈和所有子进程。详见 [`docs/demo-quickstart.md`](docs/demo-quickstart.md)。
 

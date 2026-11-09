@@ -23,6 +23,8 @@ const (
 	demoAPIKeyA      = "demo-a-api-key"
 	demoAPIKeyB      = "demo-b-api-key"
 	demoStopTimeout  = 15 * time.Second
+
+	defaultMetricsAddr = "127.0.0.1:9091"
 )
 
 type demoSeedResult struct {
@@ -51,11 +53,21 @@ func runDemo(reset bool, w io.Writer) error {
 	if err := supervisor.Prepare(ctx); err != nil {
 		return err
 	}
+	ports := supervisor.Ports()
+	if err := checkListenAddress(ports.HTTPAddr); err != nil {
+		return fmt.Errorf("start http: %v; stop the process using it (the compose stack uses port 8080) or set HTTP_ADDR to a different port", err)
+	}
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = defaultMetricsAddr
+	}
+	if err := checkListenAddress(metricsAddr); err != nil {
+		return fmt.Errorf("start metrics: %v; stop the process using it (the compose stack uses port 9091) or set METRICS_ADDR to a different port", err)
+	}
 	dsn, err := supervisor.StartDatabase(ctx)
 	if err != nil {
 		return err
 	}
-	ports := supervisor.Ports()
 	policyAddr := hostPort(ports.PolicyAddr)
 	policyURL := "http://" + policyAddr
 
@@ -129,6 +141,18 @@ func parseDemoSeed(raw []byte) (demoSeedResult, error) {
 		return result, errors.New("seed produced no tenants")
 	}
 	return result, nil
+}
+
+func checkListenAddress(addr string) error {
+	listener, err := net.Listen("tcp", addr)
+	if err == nil {
+		return listener.Close()
+	}
+	_, port, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		port = addr
+	}
+	return fmt.Errorf("port %s is already in use by another process", port)
 }
 
 func hostPort(addr string) string {

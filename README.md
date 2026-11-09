@@ -165,7 +165,7 @@ Extract the zip and run from that directory:
 .\platform.exe demo
 ```
 
-Go, Docker and the test toolchain are **not** required at runtime. The command starts the bundled Postgres, runs migrations and seed, starts the Policy as a child process, and serves the API and console. It prints the console URL (`http://127.0.0.1:8080/console`) and the API keys for tenants `demo-a` and `demo-b`; paste a key into the console. Ports 8080/5433/9090 are the same as the compose stack, so the demo and `docker compose` are mutually exclusive.
+Go, Docker and the test toolchain are **not** required at runtime. The command starts the bundled Postgres, runs migrations and seed, starts the Policy as a child process, and serves the API and console. It prints the console URL (`http://127.0.0.1:8080/console`) and the API keys for tenants `demo-a` and `demo-b`; paste a key into the console. Ports 8080, 9090 and the loopback metrics port 9091 are shared with the compose stack, so the demo and `docker compose` are mutually exclusive; the database port 5433 is not used by compose.
 
 Overrides: `HTTP_ADDR`, `DATABASE_URL`, `POLICY_ADDR`, `METRICS_ADDR` and `DEMO_DATA_DIR`. Tenant data persists in `DEMO_DATA_DIR` (default `%LOCALAPPDATA%\LiteAgentPlatform\demo`); `.\platform.exe demo --reset` clears it before starting. Ctrl-C stops the stack and every child process. Details are in [`docs/demo-quickstart.md`](docs/demo-quickstart.md).
 

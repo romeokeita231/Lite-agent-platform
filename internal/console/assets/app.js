@@ -170,8 +170,8 @@ function openWithKey(key) {
     if (err && err.unauthorized) {
       return;
     }
-    setKey("");
     showGate("Could not verify the key: " + (err && err.message ? err.message : "request failed"));
+    input.value = key;
   });
 }
 
