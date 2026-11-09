@@ -47,6 +47,21 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "demo" {
+		reset := false
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--reset":
+				reset = true
+			default:
+				log.Fatalf("platform demo: unknown argument %q", arg)
+			}
+		}
+		if err := runDemo(reset, os.Stdout); err != nil {
+			log.Fatalf("platform demo: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("platform: %v", err)
 	}

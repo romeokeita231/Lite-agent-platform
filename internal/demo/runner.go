@@ -41,6 +41,17 @@ func (ExecRunner) Start(ctx context.Context, spec ChildSpec) (Child, error) {
 		}
 		return nil, fmt.Errorf("start %s: %w", spec.Name, err)
 	}
+	group, err := startInProcessGroup(command)
+	if err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		if child.logFile != nil {
+			_ = child.logFile.Close()
+		}
+		return nil, fmt.Errorf("start %s: %w", spec.Name, err)
+	}
+	child.group = group
+	go child.wait()
 	return child, nil
 }
 
@@ -50,20 +61,26 @@ type execChild struct {
 	stderr  *bytes.Buffer
 	logFile *os.File
 	logPath string
+	group   *processGroup
 
 	waitOnce sync.Once
 	waitErr  error
 	done     chan struct{}
 }
 
-func (c *execChild) Wait() error {
+func (c *execChild) wait() {
 	c.waitOnce.Do(func() {
 		c.waitErr = c.command.Wait()
 		if c.logFile != nil {
 			_ = c.logFile.Close()
 		}
+		_ = c.group.close()
 		close(c.done)
 	})
+}
+
+func (c *execChild) Wait() error {
+	c.wait()
 	<-c.done
 	if c.waitErr == nil {
 		return nil
